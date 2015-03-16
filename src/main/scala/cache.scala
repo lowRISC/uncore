@@ -31,6 +31,7 @@ abstract trait CacheParameters extends UsesParameters {
   val rowBytes = rowBits/8
   val rowOffBits = log2Up(rowBytes)
   val refillCycles = params(TLDataBits)/rowBits
+  val tagRowBits = rowBits * (params(TagBits) + params(CoreDataBits)) / params(CoreDataBits)
 }
 
 abstract class CacheBundle extends Bundle with CacheParameters

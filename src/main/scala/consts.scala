@@ -7,15 +7,16 @@ import Chisel._
 
 object MemoryOpConstants extends MemoryOpConstants
 trait MemoryOpConstants {
-  val MT_SZ = 3
-  val MT_X  = Bits("b???")
-  val MT_B  = Bits("b000")
-  val MT_H  = Bits("b001")
-  val MT_W  = Bits("b010")
-  val MT_D  = Bits("b011")
-  val MT_BU = Bits("b100")
-  val MT_HU = Bits("b101")
-  val MT_WU = Bits("b110")
+  val MT_SZ = 4
+  val MT_X  = Bits("b????")
+  val MT_B  = Bits("b0000")
+  val MT_H  = Bits("b0001")
+  val MT_W  = Bits("b0010")
+  val MT_D  = Bits("b0011")
+  val MT_BU = Bits("b0100")
+  val MT_HU = Bits("b0101")
+  val MT_WU = Bits("b0110")
+  val MT_T  = Bits("b1111") // tag
 
   val M_SZ      = 5
   val M_X       = Bits("b?????");

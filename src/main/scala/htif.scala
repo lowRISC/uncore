@@ -67,6 +67,9 @@ class HTIFModuleIO extends HTIFBundle {
 class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
   val io = new HTIFModuleIO
 
+  // tag utilities
+  val tagUtil = new TagUtil(params(TagBits), params(CoreDataBits))
+
   io.host.debug_stats_pcr := io.cpu.map(_.debug_stats_pcr).reduce(_||_)
     // system is 'interesting' if any tile is 'interesting'
 
@@ -183,10 +186,11 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
   }
 
   var mem_req_data: Bits = null
+  val grant_payload_without_tag = tagUtil.removeTag(io.mem.grant.bits.payload.data)
   for (i <- 0 until dataBits/short_request_bits) {
     val idx = UInt(i, log2Up(dataBits/short_request_bits))
     when (state === state_mem_rresp && io.mem.grant.valid) {
-      packet_ram(idx) := io.mem.grant.bits.payload.data((i+1)*short_request_bits-1, i*short_request_bits)
+      packet_ram(idx) := grant_payload_without_tag((i+1)*short_request_bits-1, i*short_request_bits)
     }
     mem_req_data = Cat(packet_ram(idx), mem_req_data)
   }
@@ -198,7 +202,7 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
   io.mem.acquire.valid := acq_q.io.deq.valid
   acq_q.io.deq.ready := io.mem.acquire.ready
   io.mem.acquire.bits.payload := acq_q.io.deq.bits
-  io.mem.acquire.bits.payload.data := mem_req_data
+  io.mem.acquire.bits.payload.data := tagUtil.insertTag(mem_req_data)
   io.mem.acquire.bits.header.src := UInt(params(LNClients)) // By convention HTIF is the client with the largest id
   io.mem.acquire.bits.header.dst := UInt(0) // DNC; Overwritten outside module
   io.mem.finish.valid := (state === state_mem_finish) && mem_needs_ack

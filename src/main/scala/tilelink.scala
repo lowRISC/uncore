@@ -13,6 +13,9 @@ case object TLWriteMaskBits extends Field[Int]
 case object TLWordAddrBits extends Field[Int]
 case object TLAtomicOpBits extends Field[Int]
 
+// moved from rocket
+case object CoreDataBits extends Field[Int]
+
 trait HasPhysicalAddress extends Bundle {
   val addr = UInt(width = params(TLAddrBits))
 }
@@ -26,7 +29,7 @@ trait HasMasterTransactionId extends Bundle {
 }
 
 trait HasTileLinkData extends Bundle {
-  val data = Bits(width = params(TLDataBits))
+  val data = Bits(width = params(TagTLDataBits))
 }
 
 trait SourcedMessage extends Bundle
