@@ -15,6 +15,8 @@ case object TLAtomicOpBits extends Field[Int]
 
 // moved from rocket
 case object CoreDataBits extends Field[Int]
+// moved from LowRISCChip
+case object CacheBlockOffsetBits extends Field[Int]
 
 trait HasPhysicalAddress extends Bundle {
   val addr = UInt(width = params(TLAddrBits))

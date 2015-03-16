@@ -47,7 +47,8 @@ abstract trait TagCacheParameters extends UsesParameters {
 
   // uncahched Tile link interface
   val tlDataBits = params(TLDataBits)             // the datawidth of a single tile linke packet 
-  val tlDataBeats = params(TLDataBeats)           // the number of packets in a tile link burst
+  //val tlDataBeats = params(TLDataBeats)           // the number of packets in a tile link burst
+  val tlDataBeats = 1                             // TileLink in the old Rocket-chip has only one beat 
 
   // structure parameters for the tag cache
   val nTrackers = params(TagCacheTrackers)        // the number of concurrent trackers
@@ -61,7 +62,7 @@ abstract trait TagCacheParameters extends UsesParameters {
   val tagBlockRows = tagBlockBytes / tagRowBytes  // number of rows in a tag block
   val tagRowBlocks = params(TagRowBlocks)         // number of L2 blocks in a tag row
   val tagBlockTagBits = params(TagBlockTagBits)   // number of tag bits for a L2 block
-  val blockOffBits = params(BlockOffBits)
+  val blockOffBits = params(CacheBlockOffsetBits)
   val tagCacheUnRowAddrBits = log2Up(params(TagRowBlocks))
                                                   // the lower bits not used when access data array
   val tagCacheUnIndexBits = log2Up(params(TagBlockBlocks))
@@ -340,8 +341,10 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   //----------------------the uncached grant channel
   gnt_data := gnt_data.fromBits(tagUtil.insertTag(mem_acq_data_read.toBits, gnt_tag))
   c_gnt.valid := Bool(false)
-  c_gnt.bits.payload := Grant(Bool(true), Grant.uncachedRead, 
-    acq_src, UInt(0), gnt_data(gnt_data_cnt))
+  //c_gnt.bits.payload := Grant(Bool(true), Grant.uncachedRead, 
+  //  acq_src, UInt(0), gnt_data(gnt_data_cnt))
+  c_gnt.bits.payload := Grant(UInt(0), acq_src, UInt(0), gnt_data(gnt_data_cnt))
+
 
   when(gnt_enable && mem_acq_gnt_ready) {
     c_gnt.valid := Bool(true)
@@ -523,7 +526,8 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
       when(io.uncached.acquire.valid) {
         acq_src := c_acq.bits.payload.client_xact_id
         acq_addr := c_acq.bits.payload.addr
-        collect_acq_data := acq_has_data
+        if(tlDataBeats > 1)
+          collect_acq_data := acq_has_data
         acq_data_process := Bool(true)
         acq_wr := acq_has_data
         state := s_meta_read
