@@ -82,7 +82,7 @@ abstract trait TagCacheModule extends Module with TagCacheParameters
 // I/O definitions
 //--------------------------------------------------------------//
 trait TagCacheId extends Bundle with TagCacheParameters        { val id = UInt(width  = log2Up(nTrackers)) }
-trait TagCacheMetadata extends Bundle with TagCacheParameters  { val tag = Bits(width = tagCacheTagBits + 1) }
+trait TagCacheMetadata extends Bundle with TagCacheParameters  { val tag = Bits(width = tagCacheTagBits + 2) }
 trait TagCacheIdx extends Bundle with TagCacheParameters       { val idx = Bits(width = tagCacheIdxBits) }
 trait TagCacheHit extends Bundle with TagCacheParameters       { val hit = Bool() }
 
@@ -127,6 +127,9 @@ class TagCacheDataRWIO extends Bundle {
   val resp = Valid(new TagCacheDataResp).flip
 }
 
+// combine memory cmd and data for single arbitration
+class MemRequest extends MemReqCmd with HasMemData
+
 //--------------------------------------------------------------//
 // class definitions
 //--------------------------------------------------------------//
@@ -155,8 +158,6 @@ class TagCache extends TagCacheModule {
 
   // buffer queues
   val acqQueue = Module(new Queue(io.uncached.acquire.bits.clone, acqQueueDepth))
-  val memCMDQueue = Module(new Queue(new MemReqCmd, memQueueDepth))
-  val memDataQueue = Module(new Queue(new MemData, memQueueDepth))
   //val memRespQueue = Module(new Queue(new MemData, memQueueDepth))
 
   // arbiters
@@ -193,13 +194,13 @@ class TagCache extends TagCacheModule {
   outputArbitration(io.uncached.grant, trackerList.map(_.io.uncached.grant), tlDataBeats, gntHasData _)
   
   // memory interface
-  outputArbitration(memCMDQueue.io.enq, trackerList.map(_.io.mem.req_cmd))
-  io.mem.req_cmd <> memCMDQueue.io.deq
-  outputArbitration(memDataQueue.io.enq, trackerList.map(_.io.mem.req_data), mifDataBeats)
-  io.mem.req_data <> memDataQueue.io.deq
+  val memArbiter = Module(new MemArbiterInf(trackerList.size))
+  memArbiter.io.req.zip(trackerList.map(_.io.mem_req)).map { case (a, r) => a <> r }
+  io.mem.req_cmd <> memArbiter.io.mem_cmd
+  io.mem.req_data <> memArbiter.io.mem_dat
   //inputRouting(io.mem.resp, trackerList.map(_.io.mem.resp), io.mem.resp.bits.tag)
-  trackerList.map(_.io.mem.resp.bits := io.mem.resp.bits)
-  trackerList.map(_.io.mem.resp).zipWithIndex.map { case (t, i) => 
+  trackerList.map(_.io.mem_resp.bits := io.mem.resp.bits)
+  trackerList.map(_.io.mem_resp).zipWithIndex.map { case (t, i) =>
     t.valid := io.mem.resp.valid && (UInt(i) === (io.mem.resp.bits.tag >> UInt(1,1))) // the lsb is used for tag/acq
   }
 
@@ -218,11 +219,46 @@ class TagCache extends TagCacheModule {
   //inputRouting(victim.io.resp, trackerList.map(_.io.victim.resp), victim.io.resp.bits.id)
 }
 
+// an arbiter to put memory requests into CMD and DATA queues
+class MemArbiterInf(n: Int) extends TagCacheModule {
+  val io = new Bundle {
+    val req = Vec.fill(n){Decoupled(new MemRequest).flip}
+    val mem_cmd = Decoupled(new MemReqCmd)
+    val mem_dat = Decoupled(new MemData)
+  }
+
+  def HasData(m: MemRequest) = m.rw
+
+  val arb = Module(new LockingRRArbiter(io.req(0).bits.clone, n, mifDataBeats, HasData _))
+  arb.io.in zip io.req map { case (a, in) => a <> in }
+
+  val (dat_cnt, dat_done) = Counter(arb.io.out.fire() && arb.io.out.bits.rw, mifDataBeats)
+
+  val memCMDQueue = Module(new Queue(new MemReqCmd, memQueueDepth))
+  val memDataQueue = Module(new Queue(new MemData, memQueueDepth))
+
+  memCMDQueue.io.enq.valid := arb.io.out.fire() && (dat_cnt === UInt(0))
+  memCMDQueue.io.enq.bits := arb.io.out.bits
+
+  memDataQueue.io.enq.valid := arb.io.out.fire() && arb.io.out.bits.rw
+  memDataQueue.io.enq.bits := arb.io.out.bits
+
+  when(dat_cnt === UInt(0)) {
+    arb.io.out.ready := memCMDQueue.io.enq.ready && memDataQueue.io.enq.ready
+  } .otherwise {
+    arb.io.out.ready := memDataQueue.io.enq.ready
+  }
+
+  io.mem_cmd <> memCMDQueue.io.deq
+  io.mem_dat <> memDataQueue.io.deq
+}
+
 // the request tracker
 class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   val io = new Bundle {
     val uncached = new UncachedTileLinkIO().flip
-    val mem = new MemPipeIO
+    val mem_req = Decoupled(new MemRequest)
+    val mem_resp = Decoupled(new MemResp).flip
     val meta = new TagCacheMetaRWIO
     val data = new TagCacheDataRWIO
     val acq_conflict = Bool(OUTPUT)
@@ -237,7 +273,7 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   require(isPow2(nWays))
 
   // states
-  val s_idle :: s_meta_read :: s_meta_resp :: s_data_read_hit :: s_data_resp_hit :: s_data_write_hit :: s_data_read_wb :: s_data_resp_wb :: s_data_resp_wb_done :: s_write_back :: s_mem_req :: s_data_write_refill :: s_meta_write_refill :: s_gnt :: s_busy :: Nil = Enum(UInt(), 15)
+  val s_idle :: s_meta_read :: s_meta_resp :: s_data_read_hit :: s_data_resp_hit :: s_data_write_hit :: s_data_read_wb :: s_data_resp_wb :: s_data_resp_wb_done :: s_write_back :: s_mem_req :: s_data_write_refill :: s_meta_write_refill :: s_meta_write_hit :: s_gnt :: s_busy :: Nil = Enum(UInt(), 16)
   val state = Reg(init=s_idle)
 
   // coherecne
@@ -245,10 +281,11 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
 
   // tag utilities
   val tagUtil = new TagUtil(tagBits, coreDataBits)
-  def tagIsValid(tag: Bits): Bool = tag(tag.getWidth - 1)
+  def tagIsValid(meta:Bits): Bool = meta(tagCacheTagBits+1)
+  def tagIsDirty(meta:Bits): Bool = meta(tagCacheTagBits)
   def addrFromTag(tag: Bits, acq_addr: Bits): Bits = 
     Cat(tag(tag.getWidth - 2, 0), acq_addr(tagCahceUnTagBits-1, 0))
-  def addrToTag(addr: Bits): Bits = Cat(UInt(1,1), UInt(addr) >> UInt(tagCahceUnTagBits))
+  def addrToTag(addr: Bits, dirty: Bool): Bits = Cat(UInt(1,1), dirty, UInt(addr) >> UInt(tagCahceUnTagBits))
   def tagAddrConv(addr:Bits): Bits = {
     // get the fill physical addr
     val full_addr = Cat(addr, Bits(0, blockOffBits))
@@ -285,17 +322,13 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   val gnt_enable = Reg(init=Bool(false))
 
   // memory interface
-  val mem_acq_cmd_sent = Reg(init=Bool(false))
-  val mem_acq_data_sent = Reg(init=Bool(false))
   val (mem_acq_data_write_cnt, mem_acq_data_write_done) =
-    Counter(io.mem.req_data.fire() && acq_data_process, mifDataBeats)
-  val mem_acq_data_write = Vec.fill(mifDataBeats){io.mem.req_data.bits.data.clone}
-  val mem_tag_cmd_sent = Reg(init=Bool(false))
-  val mem_tag_data_sent = Reg(init=Bool(false))
+    Counter(io.mem_req.fire() && acq_data_process && acq_wr, mifDataBeats)
+  val mem_acq_data_write = Vec.fill(mifDataBeats){io.mem_req.bits.data.clone}
   val (mem_tag_data_write_cnt, mem_tag_data_write_done) =
-    Counter(io.mem.req_data.fire() && !acq_data_process, mifDataBeats)
-  val mem_tag_data_write = Vec.fill(mifDataBeats){io.mem.req_data.bits.data.clone}
-  val c_mresp = io.mem.resp
+    Counter(io.mem_req.fire() && state === s_write_back && !acq_data_process, mifDataBeats)
+  val mem_tag_data_write = Vec.fill(mifDataBeats){io.mem_req.bits.data.clone}
+  val c_mresp = io.mem_resp
   val mem_acq_data_read = Vec.fill(mifDataBeats){Reg(c_mresp.bits.data.clone)}
   val mem_tag_data_read = Vec.fill(mifDataBeats){Reg(c_mresp.bits.data.clone)}
   val mem_resp_is_acq = Bool()
@@ -356,45 +389,18 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
 
   //----------------------memory cmd and data requests interfaces
   // send out the acquire request to memory
-  io.mem.req_cmd.valid := Bool(false)
-  io.mem.req_cmd.bits.rw := acq_wr
-  io.mem.req_cmd.bits.tag := Cat(UInt(trackerId), UInt(0,1)) // lsb == 0 denotes acq requests
-  io.mem.req_cmd.bits.addr := acq_addr
-  io.mem.req_data.valid := Bool(false)
-  io.mem.req_data.bits.data := mem_acq_data_write(mem_acq_data_write_cnt)
+  io.mem_req.valid := Bool(false)
+  io.mem_req.bits.rw := acq_wr
+  io.mem_req.bits.tag := Cat(UInt(trackerId), UInt(0,1)) // lsb == 0 denotes acq requests
+  io.mem_req.bits.addr := acq_addr
+  io.mem_req.bits.data := mem_acq_data_write(mem_acq_data_write_cnt)
 
   mem_acq_data_write := mem_acq_data_write.fromBits(acq_data_no_tag.toBits)
   when(acq_data_process && !collect_acq_data) {
     // wait until the whole acquire burst is received
-
-    // send out the command
-    when(!mem_acq_cmd_sent) {
-      io.mem.req_cmd.valid := Bool(true)
-      when(io.mem.req_cmd.ready) { 
-        mem_acq_cmd_sent := Bool(true)
-      }
-    }
-
-    // send out data
-    when(!mem_acq_data_sent) {
-      when(acq_wr) { // has data
-        io.mem.req_data.valid := Bool(true)
-      }
-      when(!acq_wr || mem_acq_data_write_done) {
-        //when(mem_acq_cmd_sent) {
-        //  acq_data_process := Bool(false)
-        //  mem_acq_cmd_sent := Bool(false)
-        //}.otherwise{
-          mem_acq_data_sent := Bool(true)
-        //}
-      }
-    }
-
-    // synchronoize cmd and data, not neccessary in current memory interface
-    when(mem_acq_cmd_sent && mem_acq_data_sent) {
+    io.mem_req.valid := Bool(true)
+    when(io.mem_req.ready && (!acq_wr || mem_acq_data_write_done)) {
       acq_data_process := Bool(false)
-      mem_acq_cmd_sent := Bool(false)
-      mem_acq_data_sent := Bool(false)
     }
   }
 
@@ -402,41 +408,32 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   mem_tag_data_write := mem_tag_data_write.fromBits(wb_data.toBits)
   when(state === s_write_back && !acq_data_process) {
     // send out the command
-    when(!mem_tag_cmd_sent) {
-      io.mem.req_cmd.bits.rw := Bool(true)
-      io.mem.req_cmd.bits.tag := Cat(UInt(trackerId), UInt(1,1)) // lsb == 0 denotes tag requests
-      io.mem.req_cmd.bits.addr := tagAddrConv(addrFromTag(acq_repl_meta, acq_addr))
-      io.mem.req_cmd.valid := Bool(true)
-      when(io.mem.req_cmd.ready) { mem_tag_cmd_sent := Bool(true) }
-    }
-
-    // send out data
-    when(!mem_tag_data_sent) {
-      io.mem.req_data.bits.data := mem_tag_data_write(mem_tag_data_write_cnt)
-      io.mem.req_data.valid := Bool(true)
-      when(mem_tag_data_write_done) { mem_tag_data_sent := Bool(true) }
-    }
+    io.mem_req.bits.rw := Bool(true)
+    io.mem_req.bits.tag := Cat(UInt(trackerId), UInt(1,1)) // lsb == 0 denotes tag requests
+    io.mem_req.bits.addr := tagAddrConv(addrFromTag(acq_repl_meta, acq_addr))
+    io.mem_req.valid := Bool(true)
+    io.mem_req.bits.data := mem_tag_data_write(mem_tag_data_write_cnt)
   }
 
   // send tag missing request
   when(state === s_mem_req && !acq_data_process) {
-    io.mem.req_cmd.bits.rw := Bool(false)
-    io.mem.req_cmd.bits.tag := Cat(UInt(trackerId), UInt(1,1)) // lsb == 1 denotes tag requests
-    io.mem.req_cmd.bits.addr := tagAddrConv(acq_addr)
-    io.mem.req_cmd.valid := Bool(true)
+    io.mem_req.bits.rw := Bool(false)
+    io.mem_req.bits.tag := Cat(UInt(trackerId), UInt(1,1)) // lsb == 1 denotes tag requests
+    io.mem_req.bits.addr := tagAddrConv(acq_addr)
+    io.mem_req.valid := Bool(true)
   }
 
   //----------------------the memory response
-  mem_resp_is_acq := io.mem.resp.bits.tag(UInt(0)) === UInt(0)
-  mem_resp_is_tag := io.mem.resp.bits.tag(UInt(0)) === UInt(1)
+  mem_resp_is_acq := io.mem_resp.bits.tag(UInt(0)) === UInt(0)
+  mem_resp_is_tag := io.mem_resp.bits.tag(UInt(0)) === UInt(1)
   
-  when(io.mem.resp.valid) {
+  when(io.mem_resp.valid) {
     when(mem_resp_is_acq) {
-      mem_acq_data_read(mem_acq_data_read_cnt) := io.mem.resp.bits.data
+      mem_acq_data_read(mem_acq_data_read_cnt) := io.mem_resp.bits.data
     }
 
     when(mem_resp_is_tag) {
-      mem_tag_data_read(mem_tag_data_read_cnt) := io.mem.resp.bits.data
+      mem_tag_data_read(mem_tag_data_read_cnt) := io.mem_resp.bits.data
     }
 
     when(mem_tag_data_read_done) { mem_tag_refill_ready := Bool(true) }
@@ -446,7 +443,7 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   //----------------------meta interface
   io.meta.read.valid := Bool(false)
   io.meta.read.bits.id := UInt(trackerId)
-  io.meta.read.bits.tag := addrToTag(acq_addr)
+  io.meta.read.bits.tag := addrToTag(acq_addr, Bool(false))
   io.meta.read.bits.idx := addrToIndex(acq_addr)
   
   when(state === s_meta_read) {
@@ -461,12 +458,17 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
 
   // meta write after refill
   io.meta.write.valid := Bool(false)
-  io.meta.write.bits.tag := addrToTag(acq_addr)
+  io.meta.write.bits.tag := addrToTag(acq_addr, Bool(false))
   io.meta.write.bits.idx := addrToIndex(acq_addr)
   io.meta.write.bits.way_en := acq_way_en
 
   when(state === s_meta_write_refill) {
     io.meta.write.valid := Bool(true)
+  }
+
+  when(state === s_meta_write_hit) {
+    io.meta.write.valid := Bool(true)
+    io.meta.write.bits.tag := addrToTag(acq_addr, Bool(true))
   }
 
   //----------------------data array interface
@@ -541,7 +543,7 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
         state :=
         Mux(io.meta.resp.bits.hit,
           Mux(acq_wr, s_data_write_hit, s_data_read_hit),  // cache hit
-          Mux(tagIsValid(io.meta.resp.bits.tag),
+          Mux(tagIsValid(io.meta.resp.bits.tag) && tagIsDirty(io.meta.resp.bits.tag),
             s_data_read_wb, // cache miss, WB needed
             s_mem_req))     // cache miss, WB not needed
       }
@@ -554,7 +556,7 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
     }
     is(s_data_write_hit) {
       when(!collect_acq_data) { // ensure the acq messasge is received
-        when(io.data.write.ready) { state := s_busy }
+        when(io.data.write.ready) { state := s_meta_write_hit }
       }
     }
     is(s_data_read_wb) {
@@ -567,15 +569,13 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
       when(wb_data_done) { state := s_write_back }
     }
     is(s_write_back) {
-      when(mem_tag_data_sent && mem_tag_cmd_sent) {
+      when(mem_tag_data_write_done) {
         state := s_mem_req
-        mem_tag_data_sent := Bool(false)
-        mem_tag_cmd_sent := Bool(false)
       }
     }
     is(s_mem_req) {
       when(!acq_data_process) { // ensure the original req sent
-        when(io.mem.req_cmd.ready) { state := s_data_write_refill }
+        when(io.mem_req.ready) { state := s_data_write_refill }
       }
     }
     is(s_data_write_refill) {
@@ -588,6 +588,9 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
       when(io.meta.write.ready) {
         state := Mux(acq_wr, s_data_write_hit, s_data_read_hit)
       }
+    }
+    is(s_meta_write_hit) {
+      when(io.meta.write.ready) {state := s_busy }
     }
     is(s_gnt) {
       gnt_enable := Bool(true)
@@ -605,10 +608,10 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
 class TagCacheMetadataArray extends TagCacheModule {
   val io = new TagCacheMetaRWIO().flip
   // the highest bit in the meta is the valid flag
-  val meta_bits = tagCacheTagBits+1
+  val meta_bits = tagCacheTagBits+2
 
   val metaArray = Mem(UInt(width = meta_bits*nWays), nSets, seqRead = true)
-  val replacer = params(Replacer)()
+  val replacer = new RandomReplacement(nWays)
 
   // reset initial process
   val rst_cnt = Reg(init=UInt(0, log2Up(nSets+1)))
@@ -625,6 +628,11 @@ class TagCacheMetadataArray extends TagCacheModule {
     metaArray.write(waddr, Fill(nWays, wdata), FillInterleaved(meta_bits, wmask))
   }
 
+  // helpers
+  def getTag(meta:Bits): Bits = meta(tagCacheTagBits-1,0)
+  def isValid(meta:Bits): Bool = meta(tagCacheTagBits+1)
+  def isDirty(meta:Bits): Bool = meta(tagCacheTagBits)
+
   // read from cache array
   val ctags = metaArray(RegEnable(io.read.bits.idx, io.read.valid))
   val ctagArray = Vec((0 until nWays).map(i => ctags((i+1)*meta_bits - 1, i*meta_bits)))
@@ -633,23 +641,26 @@ class TagCacheMetadataArray extends TagCacheModule {
   val s1_tag = RegEnable(io.read.bits.tag, io.read.valid)
   val s1_id = RegEnable(io.read.bits.id, io.read.valid)
   val s1_clk_en = Reg(next = io.read.fire())
-  val s1_match_way = Vec((0 until nWays).map(i => (ctagArray(i) === s1_tag))).toBits
+  val s1_match_way = Vec((0 until nWays).map(i => (getTag(ctagArray(i)) === getTag(s1_tag) && isValid(ctagArray(i))))).toBits
+  val s1_match_meta = ctagArray(OHToUInt(s1_match_way))
   val s1_hit = s1_match_way.orR()
   val s1_replace_way = UIntToOH(replacer.way)
   val s1_replace_meta = ctagArray(replacer.way)
 
   // pipeline stage 2
   val s2_match_way = RegEnable(s1_match_way, s1_clk_en)
+  val s2_match_meta = RegEnable(s1_match_meta, s1_clk_en)
   val s2_hit = RegEnable(s1_hit, s1_clk_en)
   val s2_replace_way = RegEnable(s1_replace_way, s1_clk_en)
   val s2_replace_meta = RegEnable(s1_replace_meta, s1_clk_en)
+  when(!io.resp.bits.hit && io.resp.valid) {replacer.miss}
 
   // response composition
   io.resp.valid := Reg(next = s1_clk_en)
   io.resp.bits.id := RegEnable(s1_id, s1_clk_en)
   io.resp.bits.hit := s2_hit
   io.resp.bits.way_en := Mux(s2_hit, s2_match_way, s2_replace_way)
-  io.resp.bits.tag := s2_replace_meta
+  io.resp.bits.tag := Mux(s2_hit, s2_match_meta, s2_replace_meta)
 
   io.read.ready := !rst && !io.write.valid // so really this could be a 6T RAM
   io.write.ready := !rst
