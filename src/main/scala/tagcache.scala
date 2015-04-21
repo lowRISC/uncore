@@ -136,10 +136,18 @@ class MemRequest extends MemReqCmd with HasMemData
 
 // the top level of the tag cache
 class TagCache extends TagCacheModule {
-  val io = new Bundle {
+
+  // conditional IO to support performance counter
+  class IOBundle extends Bundle {
     val uncached = new UncachedTileLinkIO().flip
     val mem = new MemPipeIO
   }
+
+  class IOBundle_PFC extends IOBundle {
+    val pfc = new CachePerformCounterReg
+  }
+
+  val io = new IOBundle_PFC
 
   // coherecne
   val co = params(TLCoherence)
@@ -217,6 +225,17 @@ class TagCache extends TagCacheModule {
   //outputArbitration(victim.io.read, trackerList.map(_.io.victim.read))
   //outputArbitration(victim.io.write, trackerList.map(_.io.victim.write))
   //inputRouting(victim.io.resp, trackerList.map(_.io.victim.resp), victim.io.resp.bits.id)
+
+  // cache performance counter
+  if(params(UsePerformCounters)) {
+    val cPC = Module(new CachePerformCounters)
+    cPC.io.req.write := trackerList.map(_.io.pfc.write).reduce(_||_)
+    cPC.io.req.write_miss := trackerList.map(_.io.pfc.write_miss).reduce(_||_)
+    cPC.io.req.read := trackerList.map(_.io.pfc.read).reduce(_||_)
+    cPC.io.req.read_miss := trackerList.map(_.io.pfc.read_miss).reduce(_||_)
+    cPC.io.req.write_back := trackerList.map(_.io.pfc.write_back).reduce(_||_)
+    io.pfc <> cPC.io.reg
+  }
 }
 
 // an arbiter to put memory requests into CMD and DATA queues
@@ -255,7 +274,8 @@ class MemArbiterInf(n: Int) extends TagCacheModule {
 
 // the request tracker
 class TagCacheTracker(trackerId: Int) extends TagCacheModule {
-  val io = new Bundle {
+  // conditional IO to support performance counter
+  class IOBundle extends Bundle {
     val uncached = new UncachedTileLinkIO().flip
     val mem_req = Decoupled(new MemRequest)
     val mem_resp = Decoupled(new MemResp).flip
@@ -264,6 +284,12 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
     val acq_conflict = Bool(OUTPUT)
     val acq_match = Bool(OUTPUT)
   }
+
+  class IOBundle_PFC extends IOBundle {
+    val pfc = new CachePerformCounterInput().flip
+  }
+
+  val io = new IOBundle_PFC
 
   // parameter requirements
   require(mifDataBits*mifDataBeats == tlDataBits*tlDataBeats)
@@ -601,6 +627,15 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
     }
   }
 
+  // generate performance counter inputs
+  if(params(UsePerformCounters)) {
+    io.pfc.write := acq_wr && state === s_meta_read && io.meta.read.ready
+    io.pfc.write_miss := acq_wr && state === s_meta_resp && !io.meta.resp.bits.hit
+    io.pfc.read := !acq_wr && state === s_meta_read && io.meta.read.ready
+    io.pfc.read_miss := !acq_wr && state === s_meta_resp && !io.meta.resp.bits.hit
+    io.pfc.write_back := state === s_meta_resp && !io.meta.resp.bits.hit &&
+                         tagIsValid(io.meta.resp.bits.tag) && tagIsDirty(io.meta.resp.bits.tag)
+  }
 
 }
 

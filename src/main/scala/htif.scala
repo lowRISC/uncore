@@ -34,7 +34,7 @@ class HostIO extends HTIFBundle
 class PCRReq extends Bundle
 {
   val rw = Bool()
-  val addr = Bits(width = 5)
+  val addr = Bits(width =  8 ) //5) //allow more CSRs to be read by front-end server
   val data = Bits(width = 64)
 }
 
@@ -64,11 +64,26 @@ class HTIFModuleIO extends HTIFBundle {
     val scr = new SCRIO
 }
 
-class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
-  val io = new HTIFModuleIO
+class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters {
+  // conditional IO to support performance counter
+  class IOBundle extends HTIFModuleIO
+
+  class IOBundle_PFC extends IOBundle {
+    val pfc = new CachePerformCounterReg().flip
+  }
+
+  val io = new IOBundle_PFC
 
   // tag utilities
   val tagUtil = new TagUtil(params(TagBits), params(CoreDataBits))
+
+  // performance counters for tag cache
+  val reg_Tag_write_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+  val reg_Tag_write_miss_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+  val reg_Tag_read_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+  val reg_Tag_read_miss_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+  val reg_Tag_write_back_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+
 
   io.host.debug_stats_pcr := io.cpu.map(_.debug_stats_pcr).reduce(_||_)
     // system is 'interesting' if any tile is 'interesting'

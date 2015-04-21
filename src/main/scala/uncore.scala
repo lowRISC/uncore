@@ -7,6 +7,11 @@ case object NReleaseTransactors extends Field[Int]
 case object NAcquireTransactors extends Field[Int]
 case object NClients extends Field[Int]
 
+// moved from rocket core.scala
+case object CoreDataBits extends Field[Int]
+// moved from LowRISCChip
+case object CacheBlockOffsetBits extends Field[Int]
+
 abstract trait CoherenceAgentParameters extends UsesParameters {
   val co = params(TLCoherence)
   val nReleaseTransactors = params(NReleaseTransactors)
