@@ -88,6 +88,7 @@ class CachePerformCounters extends Module with CachePerformCounterParameters {
   val io = new Bundle {
     val req = new CachePerformCounterInput
     val reg = new CachePerformCounterReg
+    val pfc_reset = Bool(INPUT)
   }
 
   val requests = Vec(io.req.write, io.req.write_miss, io.req.read, io.req.read_miss, io.req.write_back)
@@ -100,6 +101,7 @@ class CachePerformCounters extends Module with CachePerformCounterParameters {
     when(r) {
       c := c + UInt(1)
     }
+    when(io.pfc_reset) { c := UInt(0) }
     o := c
   }
 

@@ -70,6 +70,7 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
 
   class IOBundle_PFC extends IOBundle {
     val pfc = new CachePerformCounterReg().flip
+    val tag_pfc_reset = Bool(OUTPUT)
   }
 
   val io = new IOBundle_PFC
@@ -83,6 +84,16 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
   val reg_Tag_read_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
   val reg_Tag_read_miss_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
   val reg_Tag_write_back_cnt = Reg(init=UInt(0, params(PerformCounterBits)))
+  val reg_tag_pfc_reset = Reg(init=Bool(false))
+
+  if(params(UsePerformCounters)) {
+    reg_Tag_write_cnt := io.pfc.write_cnt
+    reg_Tag_write_miss_cnt := io.pfc.write_miss_cnt
+    reg_Tag_read_cnt := io.pfc.read_cnt
+    reg_Tag_read_miss_cnt := io.pfc.read_miss_cnt
+    reg_Tag_write_back_cnt := io.pfc.write_back_cnt
+    io.tag_pfc_reset := reg_tag_pfc_reset
+  }
 
 
   io.host.debug_stats_pcr := io.cpu.map(_.debug_stats_pcr).reduce(_||_)
@@ -227,6 +238,16 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
   io.mem.release.valid := Bool(false)
 
   val pcr_reset = UInt(pcr_RESET)(pcr_addr.getWidth-1,0)
+
+  // performance counters
+  val pfc_Tag_write_cnt = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(0,4))
+  val pfc_Tag_write_miss_cnt = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(1,4))
+  val pfc_Tag_read_cnt = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(2,4))
+  val pfc_Tag_read_miss_cnt = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(3,4))
+  val pfc_Tag_write_back_cnt = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(4,4))
+  val pfc_tag_pfc_reset = Cat(UInt(pcr_TagBase)(pcr_addr.getWidth-1,4), UInt(15,4))
+  // end of performance counters
+
   val pcrReadData = Reg(Bits(width = io.cpu(0).pcr_rep.bits.getWidth))
   for (i <- 0 until nCores) {
     val my_reset = Reg(init=Bool(true))
@@ -234,7 +255,12 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
 
     val cpu = io.cpu(i)
     val me = pcr_coreid === UInt(i)
-    cpu.pcr_req.valid := state === state_pcr_req && me && pcr_addr != pcr_reset
+    cpu.pcr_req.valid := state === state_pcr_req && me && pcr_addr != pcr_reset &&
+                         (if(params(UsePerformCounters))
+                           pcr_addr(pcr_addr.getWidth-1,4) != UInt(15)
+                         else
+                           Bool(true))
+
     cpu.pcr_req.bits.rw := cmd === cmd_writecr
     cpu.pcr_req.bits.addr := pcr_addr
     cpu.pcr_req.bits.data := pcr_wdata
@@ -266,6 +292,61 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
     when (cpu.pcr_rep.valid) {
       pcrReadData := cpu.pcr_rep.bits
       state := state_tx
+    }
+  }
+
+  if(params(UsePerformCounters)) {
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_write_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_write_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_write_cnt
+      state := state_tx
+    }
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_write_miss_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_write_miss_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_write_miss_cnt
+      state := state_tx
+    }
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_read_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_read_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_read_cnt
+      state := state_tx
+    }
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_read_miss_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_read_miss_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_read_miss_cnt
+      state := state_tx
+    }
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_write_back_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_write_back_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_write_back_cnt
+      state := state_tx
+    }
+    when(state === state_pcr_req && pcr_addr === pfc_tag_pfc_reset) {
+      when(cmd === cmd_writecr) {
+        reg_tag_pfc_reset := pcr_wdata(0)
+      }
+      pcrReadData := reg_tag_pfc_reset
+      state := state_tx
+    }
+  }
+
+  if(params(UsePerformCounters)) {
+    when(state === state_pcr_req && pcr_addr === pfc_Tag_write_cnt) {
+      when(cmd === cmd_writecr) {
+        reg_Tag_write_cnt := pcr_wdata
+      }
+      pcrReadData := reg_Tag_write_cnt
+
     }
   }
 

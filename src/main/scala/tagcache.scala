@@ -145,6 +145,7 @@ class TagCache extends TagCacheModule {
 
   class IOBundle_PFC extends IOBundle {
     val pfc = new CachePerformCounterReg
+    val pfc_reset = Bool(INPUT)
   }
 
   val io = new IOBundle_PFC
@@ -234,6 +235,7 @@ class TagCache extends TagCacheModule {
     cPC.io.req.read := trackerList.map(_.io.pfc.read).reduce(_||_)
     cPC.io.req.read_miss := trackerList.map(_.io.pfc.read_miss).reduce(_||_)
     cPC.io.req.write_back := trackerList.map(_.io.pfc.write_back).reduce(_||_)
+    cPC.io.pfc_reset := io.pfc_reset
     io.pfc <> cPC.io.reg
   }
 }
