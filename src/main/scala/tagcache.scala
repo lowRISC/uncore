@@ -632,11 +632,21 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
   // generate performance counter inputs
   if(params(UsePerformCounters)) {
     io.pfc.write := acq_wr && state === s_meta_read && io.meta.read.ready
-    io.pfc.write_miss := acq_wr && state === s_meta_resp && !io.meta.resp.bits.hit
+    io.pfc.write_miss := acq_wr && state === s_meta_resp && io.meta.resp.valid && !io.meta.resp.bits.hit
     io.pfc.read := !acq_wr && state === s_meta_read && io.meta.read.ready
-    io.pfc.read_miss := !acq_wr && state === s_meta_resp && !io.meta.resp.bits.hit
-    io.pfc.write_back := state === s_meta_resp && !io.meta.resp.bits.hit &&
+    io.pfc.read_miss := !acq_wr && state === s_meta_resp && io.meta.resp.valid && !io.meta.resp.bits.hit
+    io.pfc.write_back := state === s_meta_resp && io.meta.resp.valid && !io.meta.resp.bits.hit &&
                          tagIsValid(io.meta.resp.bits.tag) && tagIsDirty(io.meta.resp.bits.tag)
+
+    // debug
+    if(params(DebugPrint)) {
+      //when(io.pfc.write) { printf("Tag write @%x\n", Cat(acq_addr, UInt(0,6))) }
+      when(io.pfc.write_miss) { printf("Tag write miss @%x\n", Cat(acq_addr, UInt(0,6))) }
+      //when(io.pfc.read) { printf("Tag read @%x\n", Cat(acq_addr, UInt(0,6))) }
+      when(io.pfc.read_miss) { printf("Tag read miss @%x\n", Cat(acq_addr, UInt(0,6))) }
+      when(io.pfc.write_back) { printf("Tag write back @%x\n", Cat(tagAddrConv(addrFromTag(acq_repl_meta, acq_addr)), UInt(0,6))) }
+    }
+
   }
 
 }
