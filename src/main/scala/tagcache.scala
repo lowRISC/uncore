@@ -102,6 +102,10 @@ class TagCacheMetaRWIO extends Bundle {
   val resp = Valid(new TagCacheMetaResp).flip
 }
 
+class TagCacheMetaRWIOWithRST extends TagCacheMetaRWIO {
+  val meta_reset = Bool(OUTPUT)
+}
+
 trait TagCacheData extends Bundle with TagCacheParameters  { 
   val data = Bits(width = tagBlockTagBits * tagRowBlocks) 
 }
@@ -126,6 +130,7 @@ class TagCacheDataRWIO extends Bundle {
   val write = Decoupled(new TagCacheDataWriteReq)
   val resp = Valid(new TagCacheDataResp).flip
 }
+
 
 // combine memory cmd and data for single arbitration
 class MemRequest extends MemReqCmd with HasMemData
@@ -237,6 +242,9 @@ class TagCache extends TagCacheModule {
     cPC.io.req.write_back := trackerList.map(_.io.pfc.write_back).reduce(_||_)
     cPC.io.pfc_reset := io.pfc_reset
     io.pfc <> cPC.io.reg
+    meta.io.meta_reset := io.pfc_reset
+  } else {
+    meta.io.meta_reset := Bool(false)
   }
 }
 
@@ -653,7 +661,9 @@ class TagCacheTracker(trackerId: Int) extends TagCacheModule {
 
 // tag cache metadata array
 class TagCacheMetadataArray extends TagCacheModule {
-  val io = new TagCacheMetaRWIO().flip
+  //val io = new TagCacheMetaRWIO().flip
+  val io = new TagCacheMetaRWIOWithRST().flip
+
   // the highest bit in the meta is the valid flag
   val meta_bits = tagCacheTagBits+2
 
@@ -665,6 +675,7 @@ class TagCacheMetadataArray extends TagCacheModule {
   val rst = rst_cnt < UInt(nSets)
   val rst_0 = rst_cnt === UInt(0)
   when (rst) { rst_cnt := rst_cnt+UInt(1) }
+  when (io.meta_reset) { rst_cnt := UInt(0) }
 
   // write request
   val waddr = Mux(rst, rst_cnt, io.write.bits.idx)

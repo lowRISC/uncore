@@ -340,16 +340,6 @@ class HTIF(pcr_RESET: Int, pcr_TagBase: Int) extends Module with HTIFParameters 
     }
   }
 
-  if(params(UsePerformCounters)) {
-    when(state === state_pcr_req && pcr_addr === pfc_Tag_write_cnt) {
-      when(cmd === cmd_writecr) {
-        reg_Tag_write_cnt := pcr_wdata
-      }
-      pcrReadData := reg_Tag_write_cnt
-
-    }
-  }
-
   val scr_addr = addr(log2Up(nSCR)-1, 0)
   val scr_rdata = Vec.fill(io.scr.rdata.size){Bits(width = 64)}
   for (i <- 0 until scr_rdata.size)
