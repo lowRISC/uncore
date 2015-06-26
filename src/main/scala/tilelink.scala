@@ -4,35 +4,6 @@ package uncore
 import Chisel._
 import scala.math.max
 
-/** Parameters exposed to the top-level design, set based on 
-  * external requirements or design space exploration
-  */
-/** Unique name per TileLink network*/
-case object TLId extends Field[String]
-/** Coherency policy used to define custom mesage types */
-case object TLCoherencePolicy extends Field[CoherencePolicy]
-/** Number of manager agents */
-case object TLNManagers extends Field[Int] 
-/** Number of client agents */
-case object TLNClients extends Field[Int]
-/** Number of client agents that cache data and use custom [[uncore.Acquire]] types */
-case object TLNCachingClients extends Field[Int]
-/** Number of client agents that do not cache data and use built-in [[uncore.Acquire]] types */
-case object TLNCachelessClients extends Field[Int]
-/** Maximum number of unique outstanding transactions per client */
-case object TLMaxClientXacts extends Field[Int]
-/** Maximum number of clients multiplexed onto a single port */
-case object TLMaxClientsPerPort extends Field[Int]
-/** Maximum number of unique outstanding transactions per manager */
-case object TLMaxManagerXacts extends Field[Int]
-/** Width of cache block addresses */
-case object TLBlockAddrBits extends Field[Int]
-/** Width of data beats */
-case object TLDataBits extends Field[Int]
-/** Number of data beats per cache block */
-case object TLDataBeats extends Field[Int]
-/** Whether the underlying physical network preserved point-to-point ordering of messages */
-case object TLNetworkIsOrderedP2P extends Field[Boolean]
 
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
 trait TileLinkParameters extends UsesParameters {
@@ -67,7 +38,7 @@ trait TileLinkParameters extends UsesParameters {
                               tlCoh.grantTypeWidth) + 1
   val tlNetworkPreservesPointToPointOrdering = params(TLNetworkIsOrderedP2P)
   val tlNetworkDoesNotInterleaveBeats = true
-  val amoAluOperandBits = params(AmoAluOperandBits)
+  val amoAluOperandBits = params(XLen)
 }
 
 abstract class TLBundle extends Bundle with TileLinkParameters
@@ -841,7 +812,7 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2) extends TLModule with Has
       assert(getId(io.grant.bits) <= UInt(entries), "Not enough grant beat counters, only " + entries + " entries.")
       connectIncomingDataBeatCountersWithHeader(io.grant, entries, getId).reduce(_||_)
     }
-    val q = Module(new FinishQueue(outstanding))
+    val q = Module(new FinishQueue(outstanding, io.grant.bits.header.src.clone))
     q.io.enq.valid := io.grant.fire() && g.requiresAck() && (!g.hasMultibeatData() || done)
     q.io.enq.bits.fin := g.makeFinish()
     q.io.enq.bits.dst := io.grant.bits.header.src
@@ -859,12 +830,13 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2) extends TLModule with Has
   }
 }
 
-class FinishQueueEntry extends TLBundle {
-    val fin = new Finish
-    val dst = UInt(width = log2Up(params(LNEndpoints)))
+class FinishQueueEntry[T <: Data](dType: T) extends TLBundle {
+  val fin = new Finish
+  val dst = dType.clone
+  override def clone = new FinishQueueEntry(dType).asInstanceOf[this.type]
 }
 
-class FinishQueue(entries: Int) extends Queue(new FinishQueueEntry, entries)
+class FinishQueue[T <: Data](entries: Int, dType: T) extends Queue(new FinishQueueEntry(dType), entries)
 
 /** A port to convert [[uncore.ClientTileLinkIO]].flip into [[uncore.TileLinkIO]]
   *

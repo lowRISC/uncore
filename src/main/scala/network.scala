@@ -2,9 +2,7 @@
 
 package uncore
 import Chisel._
-
-case object LNEndpoints extends Field[Int]
-case object LNHeaderBits extends Field[Int]
+import scala.math.max
 
 class PhysicalHeader(n: Int) extends Bundle {
   val src = UInt(width = log2Up(n))
@@ -17,20 +15,21 @@ class PhysicalNetworkIO[T <: Data](n: Int, dType: T) extends Bundle {
   override def clone = new PhysicalNetworkIO(n,dType).asInstanceOf[this.type]
 }
 
-class BasicCrossbarIO[T <: Data](n: Int, dType: T) extends Bundle {
-    val in  = Vec.fill(n){Decoupled(new PhysicalNetworkIO(n,dType))}.flip 
-    val out = Vec.fill(n){Decoupled(new PhysicalNetworkIO(n,dType))}
+class BasicCrossbarIO[T <: Data](nIP: Int, nOP: Int, dType: T) extends Bundle {
+  val nP  = max(nIP, nOP)
+  val in  = Vec.fill(nIP){Decoupled(new PhysicalNetworkIO(nP,dType))}.flip
+  val out = Vec.fill(nOP){Decoupled(new PhysicalNetworkIO(nP,dType))}
 }
 
 abstract class PhysicalNetwork extends Module
 
-class BasicCrossbar[T <: Data](n: Int, dType: T, count: Int = 1, needsLock: Option[PhysicalNetworkIO[T] => Bool] = None) extends PhysicalNetwork {
-  val io = new BasicCrossbarIO(n, dType)
+class BasicCrossbar[T <: Data](nIP: Int, nOP: Int, dType: T, count: Int = 1, needsLock: Option[PhysicalNetworkIO[T] => Bool] = None) extends PhysicalNetwork {
+  val io = new BasicCrossbarIO(nIP, nOP, dType)
 
-  val rdyVecs = List.fill(n){Vec.fill(n)(Bool())}
+  val rdyVecs = List.fill(nOP){Vec.fill(nIP)(Bool())}
 
   io.out.zip(rdyVecs).zipWithIndex.map{ case ((out, rdys), i) => {
-    val rrarb = Module(new LockingRRArbiter(io.in(0).bits, n, count, needsLock))
+    val rrarb = Module(new LockingRRArbiter(io.in(0).bits, nIP, count, needsLock))
     (rrarb.io.in, io.in, rdys).zipped.map{ case (arb, in, rdy) => {
       arb.valid := in.valid && (in.bits.header.dst === UInt(i)) 
       arb.bits := in.bits
@@ -38,7 +37,7 @@ class BasicCrossbar[T <: Data](n: Int, dType: T, count: Int = 1, needsLock: Opti
     }}
     out <> rrarb.io.out
   }}
-  for(i <- 0 until n) {
+  for(i <- 0 until nIP) {
     io.in(i).ready := rdyVecs.map(r => r(i)).reduceLeft(_||_)
   }
 }

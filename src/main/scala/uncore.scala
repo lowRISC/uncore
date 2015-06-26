@@ -3,10 +3,6 @@
 package uncore
 import Chisel._
 
-case object NReleaseTransactors extends Field[Int]
-case object NProbeTransactors extends Field[Int]
-case object NAcquireTransactors extends Field[Int]
-
 trait CoherenceAgentParameters extends UsesParameters {
   val nReleaseTransactors = 1
   val nAcquireTransactors = params(NAcquireTransactors)

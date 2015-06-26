@@ -4,19 +4,6 @@ package uncore
 import Chisel._
 import scala.reflect.ClassTag
 
-case object CacheName extends Field[String]
-case object NSets extends Field[Int]
-case object NWays extends Field[Int]
-case object RowBits extends Field[Int]
-case object Replacer extends Field[() => ReplacementPolicy]
-case object AmoAluOperandBits extends Field[Int]
-case object L2DirectoryRepresentation extends Field[DirectoryRepresentation]
-case object NPrimaryMisses extends Field[Int]
-case object NSecondaryMisses extends Field[Int]
-case object CacheBlockBytes extends Field[Int]
-case object CacheBlockOffsetBits extends Field[Int]
-case object ECCCode extends Field[Option[Code]]
-
 abstract trait CacheParameters extends UsesParameters {
   val nSets = params(NSets)
   val blockOffBits = params(CacheBlockOffsetBits)
@@ -66,7 +53,7 @@ class LoadGen(typ: Bits, addr: Bits, dat: Bits, zero: Bool) {
 }
 
 class AMOALU extends CacheModule {
-  val operandBits = params(AmoAluOperandBits)
+  val operandBits = params(XLen)
   require(operandBits == 64)
   val io = new Bundle {
     val addr = Bits(INPUT, blockOffBits)
@@ -173,7 +160,7 @@ abstract trait L2HellaCacheParameters extends CacheParameters with CoherenceAgen
   val refillCycles = refillCyclesPerBeat*outerDataBeats
   val internalDataBeats = params(CacheBlockBytes)*8/rowBits
   require(refillCyclesPerBeat == 1)
-  val amoAluOperandBits = params(AmoAluOperandBits)
+  val amoAluOperandBits = params(XLen)
   require(amoAluOperandBits <= innerDataBits)
   require(rowBits == innerDataBits) // TODO: relax this by improving s_data_* states
   val nSecondaryMisses = params(NSecondaryMisses)
