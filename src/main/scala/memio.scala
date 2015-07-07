@@ -8,6 +8,7 @@ trait MIFParameters extends UsesParameters {
   val mifTagBits = params(MIFTagBits)
   val mifAddrBits = params(PAddrBits) - log2Up(params(MIFDataBits)/8)
   val mifDataBits = params(MIFDataBits)
+  val mifDataBeats = params(CacheBlockBytes)*8/mifDataBits
   require(isPow2(params(MIFDataBits)))
   require(params(MIFDataBits) >= 8)
 }
