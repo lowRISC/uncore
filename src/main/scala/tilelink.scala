@@ -1209,3 +1209,40 @@ trait HasDataBeatCounters {
     (cnt > UInt(0), up_idx, up_done, down_idx, down_done)
   }
 }
+
+/** A super channel message container that can contain all kind of channels
+  * Potential useful in a crossbar shared by all channels
+  */
+class SuperChannel extends TileLinkChannel
+    with HasCacheBlockAddress
+    with HasTileLinkData
+    with HasClientTransactionId
+    with HasManagerTransactionId
+{
+  val flag = Bool() // Acquire::is_builtin_tye || Grant::is_builtin_tye || Release::voluntary
+
+  // a_type || r_type || g_type
+  val mtype = UInt(width = 
+    (tlAcquireTypeBits, tlCoh.probeTypeWidth, tlCoh.releaseTypeWidth, tlGrantTypeBits).reduce(max(_,_)))
+
+  val union = Bits(width = tlAcquireUnionBits)
+
+  val t_acquire :: t_probe :: t_release :: t_grant :: t_finish :: Nil = Enum(UInt(),5)
+  val ctype = UInt(width=3)
+}
+
+object SuperChannel {
+  def apply(acq: Aqcuire): Acquire = {
+    val msg = new SuperChannel
+    msg.ctype := t_acquire
+    msg.flag := acq.is_builtin_type
+    msg.mtype := acq.a_type
+    msg.client_xact_id := acq.client_xact_id
+    msg.addr_block := acq.addr_block
+    msg.addr_beat := acq.addr_beat
+    msg.data := acq.data
+    msg.union := acq.union
+    msg
+  }
+
+}
