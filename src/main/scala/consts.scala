@@ -41,8 +41,6 @@ trait MemoryOpConstants {
   val M_FLUSH   = Bits("b10000") // write back dirty data and cede R/W permissions
   val M_PRODUCE = Bits("b10001") // write back dirty data and cede W permissions
   val M_CLEAN   = Bits("b10011") // write back dirty data and retain R/W permissions
-  val M_IO_XRD  = Bits("b11100") // IO load
-  val M_IO_XWR  = Bits("b11101") // IO write
 
   def isAMO(cmd: Bits) = cmd(3) || cmd === M_XA_SWAP
   def isPrefetch(cmd: Bits) = cmd === M_PFR || cmd === M_PFW
