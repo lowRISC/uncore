@@ -7,18 +7,19 @@ import Chisel._
 
 object MemoryOpConstants extends MemoryOpConstants
 trait MemoryOpConstants {
-  val MT_SZ = 3
-  val MT_X  = Bits("b???")
-  val MT_B  = Bits("b000")
-  val MT_H  = Bits("b001")
-  val MT_W  = Bits("b010")
-  val MT_D  = Bits("b011")
-  val MT_BU = Bits("b100")
-  val MT_HU = Bits("b101")
-  val MT_WU = Bits("b110")
-  val MT_Q  = Bits("b111")
+  val MT_SZ = 4
+  val MT_X  = Bits("b????")
+  val MT_B  = Bits("b0000")
+  val MT_H  = Bits("b0001")
+  val MT_W  = Bits("b0010")
+  val MT_D  = Bits("b0011")
+  val MT_BU = Bits("b0100")
+  val MT_HU = Bits("b0101")
+  val MT_WU = Bits("b0110")
+  val MT_Q  = Bits("b0111")
+  val MT_T  = Bits("b1111") // tag
 
-  val NUM_XA_OPS = 9
+  val NUM_XA_OPS = 9 // ?? not used
   val M_SZ      = 5
   val M_X       = Bits("b?????");
   val M_XRD     = Bits("b00000"); // int load
@@ -40,6 +41,8 @@ trait MemoryOpConstants {
   val M_FLUSH   = Bits("b10000") // write back dirty data and cede R/W permissions
   val M_PRODUCE = Bits("b10001") // write back dirty data and cede W permissions
   val M_CLEAN   = Bits("b10011") // write back dirty data and retain R/W permissions
+  val M_IO_XRD  = Bits("b11100") // IO load
+  val M_IO_XWR  = Bits("b11101") // IO write
 
   def isAMO(cmd: Bits) = cmd(3) || cmd === M_XA_SWAP
   def isPrefetch(cmd: Bits) = cmd === M_PFR || cmd === M_PFW
