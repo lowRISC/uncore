@@ -1230,6 +1230,27 @@ class SuperChannel extends TileLinkChannel
   val t_acquire :: t_probe :: t_release :: t_grant :: t_finish :: Nil = Enum(UInt(),5)
   val ctype = UInt(width=3)
 
+  // implement virtual helper functions derived from TileLinkChannel
+  def hasData(dummy: Int = 0): Bool = {
+    MuxLookup(ctype, Bool(false), Array(
+      t_acquire  -> toAcquire().hasData(),
+      t_probe    -> toProbe().hasData(),
+      t_release  -> toRelease().hasData(),
+      t_grant    -> toGrant().hasData(),
+      t_finish   -> toFinish().hasData()
+    ))
+  }
+
+  def hasMultibeatData(dummy: Int = 0): Bool = {
+    MuxLookup(ctype, Bool(false), Array(
+      t_acquire  -> toAcquire().hasMultibeatData(),
+      t_probe    -> toProbe().hasMultibeatData(),
+      t_release  -> toRelease().hasMultibeatData(),
+      t_grant    -> toGrant().hasMultibeatData(),
+      t_finish   -> toFinish().hasMultibeatData()
+    ))
+  }
+
   // conversion helpers
   def toAcquire(dummy: Int = 0) = 
     Acquire(flag, mtype, client_xact_id, addr_block, addr_beat, data, union)
