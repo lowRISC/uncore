@@ -1229,10 +1229,26 @@ class SuperChannel extends TileLinkChannel
 
   val t_acquire :: t_probe :: t_release :: t_grant :: t_finish :: Nil = Enum(UInt(),5)
   val ctype = UInt(width=3)
+
+  // conversion helpers
+  def toAcquire(dummy: Int = 0) = 
+    Acquire(flag, mtype, client_xact_id, addr_block, addr_beat, data, union)
+  def toProbe(dummy: Int = 0) =
+    Probe(mtype, addr_block)
+  def toRelease(dummy: Int = 0) =
+    Release(flag, mtype, client_xact_id, addr_block, addr_beat, data)
+  def toGrant(dummy: Int = 0) =
+    Grant(flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
+  def toFinish(dummy: Int = 0): Finish = {
+    val fin = new Finish
+    fin.manager_xact_id := manager_xact_id
+    fin
+  }
 }
 
 object SuperChannel {
-  def apply(acq: Aqcuire): Acquire = {
+  // Acquire => SuperChannel
+  def apply(acq: Aqcuire): SuperChannel = {
     val msg = new SuperChannel
     msg.ctype := t_acquire
     msg.flag := acq.is_builtin_type
@@ -1242,6 +1258,49 @@ object SuperChannel {
     msg.addr_beat := acq.addr_beat
     msg.data := acq.data
     msg.union := acq.union
+    msg
+  }
+
+  // Probe => SuperChannel
+  def apply(prb: Probe): SuperChannel = {
+    val msg = new SuperChannel
+    msg.ctype := t_probe
+    msg.mtype := prb.p_type
+    msg.addr_block := prb.addr_block
+    msg
+  }
+
+  // Release => SuperChannel
+  def apply(rel: Release): SuperChannel = {
+    val msg = new SuperChannel
+    msg.ctype := t_release
+    msg.mtype := rel.r_type
+    msg.client_xact_id := rel.client_xact_id
+    msg.addr_block := rel.addr_block
+    msg.addr_beat := rel.addr_beat
+    msg.data := rel.data
+    msg.flag := rel.voluntary
+    msg
+  }
+
+  // Grant => SuperChannel
+  def apply(gnt: Grant): SuperChannel = {
+    val msg = new SuperChannel
+    msg.ctype := t_grant
+    msg.flag := gnt.is_builtin_type
+    msg.mtype := gnt.g_type
+    msg.client_xact_id := gnt.client_xact_id
+    msg.manager_xact_id := gnt.manager_xact_id
+    msg.addr_beat := gnt.addr_beat
+    msg.data := gnt.data
+    msg
+  }
+
+  // Finish => SuperChannel
+  def apply(fin: Finish): SuperChannel = {
+    val msg = new SuperChannel
+    msg.ctype := t_finish
+    msg.manager_xact_id := fin.manager_xact_id
     msg
   }
 
