@@ -9,7 +9,7 @@ abstract trait IOSpaceParameters extends UsesParameters {
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
-class IOSpaceConsts extends Moduel with IOSpaceParameters {
+class IOSpaceConsts extends Module with IOSpaceParameters {
   val io = new Bundle {
     val base = Vec.fill(2){UInt(OUTPUT, xLen)} // base for CSR
     val mask = Vec.fill(2){UInt(OUTPUT, xLen)} // mask for CSR
@@ -19,6 +19,7 @@ class IOSpaceConsts extends Moduel with IOSpaceParameters {
 
   val base = Vec.fill(2){UInt(width = xLen)}
   val mask = Vec.fill(2){UInt(width = xLen)}
+  val check = Vec.fill(2){Bool()}
 
   base(0) := params(IOBaseAddr0)
   mask(0) := params(IOAddrMask0)
@@ -28,10 +29,9 @@ class IOSpaceConsts extends Moduel with IOSpaceParameters {
   io.base := base
   io.mask := mask
 
-  val check = (0 until 2).map(i =>
-    io.paddr & ~ mask(i)(pALen,0) === base(i)(pALen,0)
-  )
-
-  io.isIO := check.map(_).reduce(_||_)
+  for(i <- 0 until 2) {
+    check(i) := (io.paddr & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
+  }
+  io.isIO := check.reduce(_||_)
 }
 

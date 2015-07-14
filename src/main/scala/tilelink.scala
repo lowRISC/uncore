@@ -1223,31 +1223,29 @@ class SuperChannel extends TileLinkChannel
 
   // a_type || r_type || g_type
   val mtype = UInt(width = 
-    (tlAcquireTypeBits, tlCoh.probeTypeWidth, tlCoh.releaseTypeWidth, tlGrantTypeBits).reduce(max(_,_)))
+    Array(tlAcquireTypeBits, tlCoh.probeTypeWidth, tlCoh.releaseTypeWidth, tlGrantTypeBits).reduceLeft(_ max _))
 
   val union = Bits(width = tlAcquireUnionBits)
-
-  val t_acquire :: t_probe :: t_release :: t_grant :: t_finish :: Nil = Enum(UInt(),5)
-  val ctype = UInt(width=3)
+  val ctype = UInt(width=3) // type of the channel (Acquire, Probe, Release, Grant, Finish)
 
   // implement virtual helper functions derived from TileLinkChannel
   def hasData(dummy: Int = 0): Bool = {
     MuxLookup(ctype, Bool(false), Array(
-      t_acquire  -> toAcquire().hasData(),
-      t_probe    -> toProbe().hasData(),
-      t_release  -> toRelease().hasData(),
-      t_grant    -> toGrant().hasData(),
-      t_finish   -> toFinish().hasData()
+      SuperChannel.acquireType  -> toAcquire().hasData(),
+      SuperChannel.probeType    -> toProbe().hasData(),
+      SuperChannel.releaseType  -> toRelease().hasData(),
+      SuperChannel.grantType    -> toGrant().hasData(),
+      SuperChannel.finishType   -> toFinish().hasData()
     ))
   }
 
   def hasMultibeatData(dummy: Int = 0): Bool = {
     MuxLookup(ctype, Bool(false), Array(
-      t_acquire  -> toAcquire().hasMultibeatData(),
-      t_probe    -> toProbe().hasMultibeatData(),
-      t_release  -> toRelease().hasMultibeatData(),
-      t_grant    -> toGrant().hasMultibeatData(),
-      t_finish   -> toFinish().hasMultibeatData()
+      SuperChannel.acquireType  -> toAcquire().hasMultibeatData(),
+      SuperChannel.probeType    -> toProbe().hasMultibeatData(),
+      SuperChannel.releaseType  -> toRelease().hasMultibeatData(),
+      SuperChannel.grantType    -> toGrant().hasMultibeatData(),
+      SuperChannel.finishType   -> toFinish().hasMultibeatData()
     ))
   }
 
@@ -1267,19 +1265,26 @@ class SuperChannel extends TileLinkChannel
   }
 
   // type checker
-  def isAcquire(dummy: Int = 0): Bool = ctype === t_acquire
-  def isProbe(dummy: Int = 0): Bool = ctype === t_probe
-  def isRelease(dummy: Int = 0): Bool = ctype === t_release
-  def isGrant(dummy: Int = 0): Bool = ctype === t_grant
-  def isFinish(dummy: Int = 0): Bool = ctype === t_finish
+  def isAcquire(dummy: Int = 0): Bool = ctype === SuperChannel.acquireType
+  def isProbe(dummy: Int = 0): Bool = ctype === SuperChannel.probeType
+  def isRelease(dummy: Int = 0): Bool = ctype === SuperChannel.releaseType
+  def isGrant(dummy: Int = 0): Bool = ctype === SuperChannel.grantType
+  def isFinish(dummy: Int = 0): Bool = ctype === SuperChannel.finishType
 
 }
 
 object SuperChannel {
+  // channel types
+  def acquireType = UInt("b000")
+  def probeType   = UInt("b001")
+  def releaseType = UInt("b010")
+  def grantType   = UInt("b011")
+  def finishType  = UInt("b100")
+
   // Acquire => SuperChannel
-  def apply(acq: Aqcuire): SuperChannel = {
+  def apply(acq: Acquire): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := t_acquire
+    msg.ctype := SuperChannel.acquireType
     msg.flag := acq.is_builtin_type
     msg.mtype := acq.a_type
     msg.client_xact_id := acq.client_xact_id
@@ -1293,7 +1298,7 @@ object SuperChannel {
   // Probe => SuperChannel
   def apply(prb: Probe): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := t_probe
+    msg.ctype := probeType
     msg.mtype := prb.p_type
     msg.addr_block := prb.addr_block
     msg
@@ -1302,7 +1307,7 @@ object SuperChannel {
   // Release => SuperChannel
   def apply(rel: Release): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := t_release
+    msg.ctype := SuperChannel.releaseType
     msg.mtype := rel.r_type
     msg.client_xact_id := rel.client_xact_id
     msg.addr_block := rel.addr_block
@@ -1315,7 +1320,7 @@ object SuperChannel {
   // Grant => SuperChannel
   def apply(gnt: Grant): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := t_grant
+    msg.ctype := SuperChannel.grantType
     msg.flag := gnt.is_builtin_type
     msg.mtype := gnt.g_type
     msg.client_xact_id := gnt.client_xact_id
@@ -1328,7 +1333,7 @@ object SuperChannel {
   // Finish => SuperChannel
   def apply(fin: Finish): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := t_finish
+    msg.ctype := SuperChannel.finishType
     msg.manager_xact_id := fin.manager_xact_id
     msg
   }
@@ -1343,12 +1348,11 @@ class SuperChannelInputMultiplexer
 {
   val io = new Bundle {
     val tl = new TileLinkIO
-    val su = new SuperChannel
+    val su = Decoupled(new LogicalNetworkIO(new SuperChannel))
   }
 
-  def hasData[M <: ClientToManagerChannel](m: LogicalNetworkIO[M]) =
-    m.payload.hasMultibeatDate()
-  val arb = Module(new LockingArbiter(io.out.bits.clone, 3, tlDataBeats, Some(hasData _)))
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
+  val arb = Module(new LockingArbiter(io.su.bits.clone, 3, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0) <> io.tl.finish
   //arb.io.in(0).bits.header := io.tl.finish.bits.header
@@ -1373,12 +1377,11 @@ class SuperChannelOutputMultiplexer
 {
   val io = new Bundle {
     val tl = new TileLinkIO().flip
-    val su = new SuperChannel
+    val su = Decoupled(new LogicalNetworkIO(new SuperChannel))
   }
 
-  def hasData[M <: ManagerToClientChannel](m: LogicalNetworkIO[M]) =
-    m.payload.hasMultibeatDate()
-  val arb = Module(new LockingArbiter(io.out.bits.clone, 2, tlDataBeats, Some(hasData _)))
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
+  val arb = Module(new LockingArbiter(io.su.bits.clone, 2, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0) <> io.tl.grant
   //arb.io.in(0).bits.header := io.tl.grant.bits.header
@@ -1396,12 +1399,12 @@ class SuperChannelOutputMultiplexer
 /** Super channel demultiplexer to route super channel to corresponding
   * TileLink channels.
   */
-class class SuperChannelInputDemultiplexer
+class SuperChannelInputDemultiplexer
     extends TLModule
 {
   val io = new Bundle {
     val tl = new TileLinkIO
-    val su = new SuperChannel().flip
+    val su = Decoupled(new LogicalNetworkIO(new SuperChannel)).flip
   }
 
   io.tl.grant <> io.su
@@ -1413,12 +1416,12 @@ class class SuperChannelInputDemultiplexer
   io.tl.probe.valid := io.su.valid && io.su.bits.payload.isProbe()
 }
 
-class class SuperChannelOutputDemultiplexer
+class SuperChannelOutputDemultiplexer
     extends TLModule
 {
   val io = new Bundle {
     val tl = new TileLinkIO().flip
-    val su = new SuperChannel().flip
+    val su = Decoupled(new LogicalNetworkIO(new SuperChannel)).flip
   }
 
   io.tl.finish <> io.su
