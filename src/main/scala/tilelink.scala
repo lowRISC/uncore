@@ -1218,6 +1218,7 @@ class SuperChannel extends TileLinkChannel
     with HasTileLinkData
     with HasClientTransactionId
     with HasManagerTransactionId
+    with HasClientId
 {
   val flag = Bool() // Acquire::is_builtin_tye || Grant::is_builtin_tye || Release::voluntary
 
@@ -1254,10 +1255,14 @@ class SuperChannel extends TileLinkChannel
     Acquire(flag, mtype, client_xact_id, addr_block, addr_beat, data, union)
   def toProbe(dummy: Int = 0) =
     Probe(mtype, addr_block)
+  def toProbeToDst(dummy: Int = 0) =
+    Probe(client_id, mtype, addr_block)
   def toRelease(dummy: Int = 0) =
     Release(flag, mtype, client_xact_id, addr_block, addr_beat, data)
   def toGrant(dummy: Int = 0) =
     Grant(flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
+  def toGrantToDst(dummy: Int = 0) =
+    Grant(client_id, flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
   def toFinish(dummy: Int = 0): Finish = {
     val fin = new Finish
     fin.manager_xact_id := manager_xact_id
@@ -1270,7 +1275,6 @@ class SuperChannel extends TileLinkChannel
   def isRelease(dummy: Int = 0): Bool = ctype === SuperChannel.releaseType
   def isGrant(dummy: Int = 0): Bool = ctype === SuperChannel.grantType
   def isFinish(dummy: Int = 0): Bool = ctype === SuperChannel.finishType
-
 }
 
 object SuperChannel {
@@ -1284,7 +1288,7 @@ object SuperChannel {
   // Acquire => SuperChannel
   def apply(acq: Acquire): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := SuperChannel.acquireType
+    msg.ctype := acquireType
     msg.flag := acq.is_builtin_type
     msg.mtype := acq.a_type
     msg.client_xact_id := acq.client_xact_id
@@ -1307,7 +1311,7 @@ object SuperChannel {
   // Release => SuperChannel
   def apply(rel: Release): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := SuperChannel.releaseType
+    msg.ctype := releaseType
     msg.mtype := rel.r_type
     msg.client_xact_id := rel.client_xact_id
     msg.addr_block := rel.addr_block
@@ -1320,7 +1324,7 @@ object SuperChannel {
   // Grant => SuperChannel
   def apply(gnt: Grant): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := SuperChannel.grantType
+    msg.ctype := grantType
     msg.flag := gnt.is_builtin_type
     msg.mtype := gnt.g_type
     msg.client_xact_id := gnt.client_xact_id
@@ -1333,7 +1337,7 @@ object SuperChannel {
   // Finish => SuperChannel
   def apply(fin: Finish): SuperChannel = {
     val msg = new SuperChannel
-    msg.ctype := SuperChannel.finishType
+    msg.ctype := finishType
     msg.manager_xact_id := fin.manager_xact_id
     msg
   }
@@ -1347,51 +1351,53 @@ class SuperChannelInputMultiplexer
     extends TLModule
 {
   val io = new Bundle {
-    val tl = new TileLinkIO
+    val tl = new TileLinkIO().flip
     val su = Decoupled(new LogicalNetworkIO(new SuperChannel))
   }
 
-  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
+
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = Bool(true) //m.payload.hasMultibeatData()
   val arb = Module(new LockingArbiter(io.su.bits.clone, 3, tlDataBeats, Some(hasData _)))
 
-  arb.io.in(0) <> io.tl.finish
-  //arb.io.in(0).bits.header := io.tl.finish.bits.header
+  arb.io.in(0).valid := io.tl.finish.valid
+  arb.io.in(0).bits.header := io.tl.finish.bits.header
   arb.io.in(0).bits.payload := SuperChannel(io.tl.finish.bits.payload)
-  //io.tl.finish.ready := arb.io.in(0).ready
+  io.tl.finish.ready := arb.io.in(0).ready
 
-  arb.io.in(1) <> io.tl.release
-  //arb.io.in(1).bits.header := io.tl.release.bits.header
+  arb.io.in(1).valid := io.tl.release.valid
+  arb.io.in(1).bits.header := io.tl.release.bits.header
   arb.io.in(1).bits.payload := SuperChannel(io.tl.release.bits.payload)
-  //io.tl.release.ready := arb.io.in(1).ready
+  io.tl.release.ready := arb.io.in(1).ready
 
-  arb.io.in(2) <> io.tl.acquire
-  //arb.io.in(2).bits.header := io.tl.acquire.bits.header
+  arb.io.in(2).valid := io.tl.acquire.valid
+  arb.io.in(2).bits.header := io.tl.acquire.bits.header
   arb.io.in(2).bits.payload := SuperChannel(io.tl.acquire.bits.payload)
-  //io.tl.acquire.ready := arb.io.in(1).ready
+  io.tl.acquire.ready := arb.io.in(1).ready
 
   arb.io.out <> io.su
+
 }
 
 class SuperChannelOutputMultiplexer
     extends TLModule
 {
   val io = new Bundle {
-    val tl = new TileLinkIO().flip
+    val tl = new TileLinkIO
     val su = Decoupled(new LogicalNetworkIO(new SuperChannel))
   }
 
-  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = Bool(true) // m.payload.hasMultibeatData()
   val arb = Module(new LockingArbiter(io.su.bits.clone, 2, tlDataBeats, Some(hasData _)))
 
-  arb.io.in(0) <> io.tl.grant
-  //arb.io.in(0).bits.header := io.tl.grant.bits.header
+  arb.io.in(0).valid := io.tl.grant.valid
+  arb.io.in(0).bits.header := io.tl.grant.bits.header
   arb.io.in(0).bits.payload := SuperChannel(io.tl.grant.bits.payload)
-  //io.tl.grant.ready := arb.io.in(0).ready
+  io.tl.grant.ready := arb.io.in(0).ready
 
-  arb.io.in(1) <> io.tl.probe
-  //arb.io.in(1).bits.header := io.tl.probe.bits.header
+  arb.io.in(1).valid := io.tl.probe.valid
+  arb.io.in(1).bits.header := io.tl.probe.bits.header
   arb.io.in(1).bits.payload := SuperChannel(io.tl.probe.bits.payload)
-  //io.tl.probe.ready := arb.io.in(1).ready
+  io.tl.probe.ready := arb.io.in(1).ready
 
   arb.io.out <> io.su
 }
@@ -1403,36 +1409,63 @@ class SuperChannelInputDemultiplexer
     extends TLModule
 {
   val io = new Bundle {
-    val tl = new TileLinkIO
+    val tl = new TileLinkIO().flip
     val su = Decoupled(new LogicalNetworkIO(new SuperChannel)).flip
   }
 
-  io.tl.grant <> io.su
-  io.tl.grant.bits.payload := io.su.bits.payload.toGrant()
   io.tl.grant.valid := io.su.valid && io.su.bits.payload.isGrant()
-
-  io.tl.probe <> io.su
-  io.tl.probe.bits.payload := io.su.bits.payload.toProbe()
+  io.tl.grant.bits.header := io.su.bits.header
+  io.tl.grant.bits.payload := io.su.bits.payload.toGrant()
+  
   io.tl.probe.valid := io.su.valid && io.su.bits.payload.isProbe()
+  io.tl.probe.bits.header := io.su.bits.header
+  io.tl.probe.bits.payload := io.su.bits.payload.toProbe()
+  
+  // handle the ready signals
+  io.su.ready := Bool(false)
+
+  when(io.su.valid) {
+    when(io.su.bits.payload.isGrant()) {
+      io.su.ready := io.tl.grant.ready
+    }
+    when(io.su.bits.payload.isProbe()) {
+      io.su.ready := io.tl.probe.ready
+    }
+  }
 }
 
 class SuperChannelOutputDemultiplexer
     extends TLModule
 {
   val io = new Bundle {
-    val tl = new TileLinkIO().flip
+    val tl = new TileLinkIO
     val su = Decoupled(new LogicalNetworkIO(new SuperChannel)).flip
   }
 
-  io.tl.finish <> io.su
-  io.tl.finish.bits.payload := io.su.bits.payload.toFinish()
   io.tl.finish.valid := io.su.valid && io.su.bits.payload.isFinish()
+  io.tl.finish.bits.header := io.su.bits.header
+  io.tl.finish.bits.payload := io.su.bits.payload.toFinish()
 
-  io.tl.release <> io.su
-  io.tl.release.bits.payload := io.su.bits.payload.toRelease()
   io.tl.release.valid := io.su.valid && io.su.bits.payload.isRelease()
+  io.tl.release.bits.header := io.su.bits.header
+  io.tl.release.bits.payload := io.su.bits.payload.toRelease()
 
-  io.tl.acquire <> io.su
-  io.tl.acquire.bits.payload := io.su.bits.payload.toAcquire()
   io.tl.acquire.valid := io.su.valid && io.su.bits.payload.isAcquire()
+  io.tl.acquire.bits.header := io.su.bits.header
+  io.tl.acquire.bits.payload := io.su.bits.payload.toAcquire()
+
+  // handle the ready signals
+  io.su.ready := Bool(false)
+
+  when(io.su.valid) {
+    when(io.su.bits.payload.isFinish()) {
+      io.su.ready := io.tl.finish.ready
+    }
+    when(io.su.bits.payload.isRelease()) {
+      io.su.ready := io.tl.release.ready
+    }
+    when(io.su.bits.payload.isAcquire()) {
+      io.su.ready := io.tl.acquire.ready
+    }
+  }
 }
