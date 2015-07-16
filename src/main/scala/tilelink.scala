@@ -1221,6 +1221,7 @@ class SuperChannel extends TileLinkChannel
     with HasClientId
 {
   val flag = Bool() // Acquire::is_builtin_tye || Grant::is_builtin_tye || Release::voluntary
+  val hasMultibeatData = Bool() // TODO: current toAcquire, etc. does not work
 
   // a_type || r_type || g_type
   val mtype = UInt(width = 
@@ -1241,6 +1242,8 @@ class SuperChannel extends TileLinkChannel
   }
 
   def hasMultibeatData(dummy: Int = 0): Bool = {
+    // TODO: No idea why toAcquire etc. does not work
+    /*
     MuxLookup(ctype, Bool(false), Array(
       SuperChannel.acquireType  -> toAcquire().hasMultibeatData(),
       SuperChannel.probeType    -> toProbe().hasMultibeatData(),
@@ -1248,6 +1251,8 @@ class SuperChannel extends TileLinkChannel
       SuperChannel.grantType    -> toGrant().hasMultibeatData(),
       SuperChannel.finishType   -> toFinish().hasMultibeatData()
     ))
+     */
+    hasMultibeatData
   }
 
   // conversion helpers
@@ -1255,14 +1260,10 @@ class SuperChannel extends TileLinkChannel
     Acquire(flag, mtype, client_xact_id, addr_block, addr_beat, data, union)
   def toProbe(dummy: Int = 0) =
     Probe(mtype, addr_block)
-  def toProbeToDst(dummy: Int = 0) =
-    Probe(client_id, mtype, addr_block)
   def toRelease(dummy: Int = 0) =
     Release(flag, mtype, client_xact_id, addr_block, addr_beat, data)
   def toGrant(dummy: Int = 0) =
     Grant(flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
-  def toGrantToDst(dummy: Int = 0) =
-    Grant(client_id, flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
   def toFinish(dummy: Int = 0): Finish = {
     val fin = new Finish
     fin.manager_xact_id := manager_xact_id
@@ -1296,6 +1297,7 @@ object SuperChannel {
     msg.addr_beat := acq.addr_beat
     msg.data := acq.data
     msg.union := acq.union
+    msg.hasMultibeatData := acq.hasMultibeatData()
     msg
   }
 
@@ -1305,6 +1307,7 @@ object SuperChannel {
     msg.ctype := probeType
     msg.mtype := prb.p_type
     msg.addr_block := prb.addr_block
+    msg.hasMultibeatData := prb.hasMultibeatData()
     msg
   }
 
@@ -1318,6 +1321,7 @@ object SuperChannel {
     msg.addr_beat := rel.addr_beat
     msg.data := rel.data
     msg.flag := rel.voluntary
+    msg.hasMultibeatData := rel.hasMultibeatData()
     msg
   }
 
@@ -1331,6 +1335,7 @@ object SuperChannel {
     msg.manager_xact_id := gnt.manager_xact_id
     msg.addr_beat := gnt.addr_beat
     msg.data := gnt.data
+    msg.hasMultibeatData := gnt.hasMultibeatData()
     msg
   }
 
@@ -1339,6 +1344,7 @@ object SuperChannel {
     val msg = new SuperChannel
     msg.ctype := finishType
     msg.manager_xact_id := fin.manager_xact_id
+    msg.hasMultibeatData := fin.hasMultibeatData()
     msg
   }
 
@@ -1356,7 +1362,7 @@ class SuperChannelInputMultiplexer
   }
 
 
-  def hasData(m: LogicalNetworkIO[SuperChannel]) = Bool(true) //m.payload.hasMultibeatData()
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
   val arb = Module(new LockingArbiter(io.su.bits.clone, 3, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0).valid := io.tl.finish.valid
@@ -1386,7 +1392,7 @@ class SuperChannelOutputMultiplexer
     val su = Decoupled(new LogicalNetworkIO(new SuperChannel))
   }
 
-  def hasData(m: LogicalNetworkIO[SuperChannel]) = Bool(true) // m.payload.hasMultibeatData()
+  def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
   val arb = Module(new LockingArbiter(io.su.bits.clone, 2, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0).valid := io.tl.grant.valid
