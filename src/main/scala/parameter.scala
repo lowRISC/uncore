@@ -22,6 +22,7 @@ case object IOBaseAddr0 extends Field[UInt]
 case object IOAddrMask0 extends Field[UInt]
 case object IOBaseAddr1 extends Field[UInt]
 case object IOAddrMask1 extends Field[UInt]
+case object IODataBits extends Field[UInt]
 
 //Params used by all caches
 case object NSets extends Field[Int]

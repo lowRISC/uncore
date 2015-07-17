@@ -1,22 +1,25 @@
 // See LICENSE for license details.
 
+
+// TODO: move this to bridge package
+
+
 package uncore
 import Chisel._
 import scala.math.max
 
+case object BusId extends Field[String]
+case object NASTIDataBits extends Field[Int]
+case object NASTIAddrBits extends Field[Int]
+case object NASTIIdBits extends Field[Int]
+case object NASTIUserBits extends Field[Int]
+
 trait NASTIParameters extends UsesParameters {
-  val nastiXDataBits = params(MIFDataBits)
+  val nastiXDataBits = params(NASTIDataBits)
   val nastiWStrobeBits = nastiXDataBits / 8
-  val nastiXAddrBits = params(PAddrBits) - log2Up(params(MIFDataBits)/8)
-  val nastiWIdBits = params(MIFTagBits)
-  val nastiRIdBits = params(MIFTagBits)
-  val nastiXIdBits = max(nastiWIdBits, nastiRIdBits)
-  val nastiXUserBits = 1
-  val nastiAWUserBits = nastiXUserBits
-  val nastiWUserBits = nastiXUserBits
-  val nastiBUserBits = nastiXUserBits
-  val nastiARUserBits = nastiXUserBits
-  val nastiRUserBits = nastiXUserBits
+  val nastiXAddrBits = params(NASTIAddrBits)
+  val nastiXIdBits = params(NASTIIdBits)
+  val nastiXUserBits = params(NASTIUserBits)
   val nastiXLenBits = 8
   val nastiXSizeBits = 3
   val nastiXBurstBits = 2
@@ -44,6 +47,7 @@ trait NASTIChannel extends NASTIBundle
 trait NASTIMasterToSlaveChannel extends NASTIChannel
 trait NASTISlaveToMasterChannel extends NASTIChannel
 
+//---------------------- fields ------------------------//
 class NASTIMasterIO extends Bundle {
   val aw = Decoupled(new NASTIWriteAddressChannel)
   val w  = Decoupled(new NASTIWriteDataChannel)
@@ -52,56 +56,77 @@ class NASTIMasterIO extends Bundle {
   val r  = Decoupled(new NASTIReadDataChannel).flip
 }
 
+class NASTILiteMasterIO extends Bundle {
+  val aw = Decoupled(new NASTILiteWriteAddressChannel)
+  val w  = Decoupled(new NASTILiteWriteDataChannel)
+  val b  = Decoupled(new NASTILiteWriteResponseChannel).flip
+  val ar = Decoupled(new NASTILiteReadAddressChannel)
+  val r  = Decoupled(new NASTILiteReadDataChannel).flip
+}
+
 class NASTISlaveIO extends NASTIMasterIO { flip() }
+class NASTILiteSlaveIO extends NASTILiteMasterIO { flip() }
+
+// the detailed field definitions
+
+trait HasNASTIId extends NASTIBundle {
+  val id   = UInt(width = nastiXIdBits)
+}
 
 trait HasNASTIMetadata extends NASTIBundle {
-  val addr   = UInt(width = nastiXAddrBits)
   val len    = UInt(width = nastiXLenBits)
   val size   = UInt(width = nastiXSizeBits)
   val burst  = UInt(width = nastiXBurstBits)
   val lock   = Bool()
   val cache  = UInt(width = nastiXCacheBits)
+}
+
+trait HasNASTIData extends NASTIBundle {
+  val data = UInt(width = nastiXDataBits)
+}
+
+trait HasWStrb extends NASTIBundle {
+  val strb = UInt(width = nastiWStrobeBits)
+}
+
+trait HasNASTILast extends NASTIBundle {
+  val last = Bool()
+}
+
+trait HasNASTIUser extends NASTIBundle {
+  val user = UInt(width = nastiXUserBits)
+}
+
+//---------------------- channels ------------------------//
+class NASTIAddressChannel extends NASTIMasterToSlaveChannel with HasNASTIId with HasNASTIUser {
+  val addr   = UInt(width = nastiXAddrBits)
   val prot   = UInt(width = nastiXProtBits)
   val qos    = UInt(width = nastiXQosBits)
   val region = UInt(width = nastiXRegionBits)
 }
 
-trait HasNASTIData extends NASTIBundle {
-  val data = UInt(width = nastiXDataBits)
-  val last = Bool()
-}
-
-class NASTIAddressChannel extends NASTIMasterToSlaveChannel with HasNASTIMetadata
-
-class NASTIResponseChannel extends NASTISlaveToMasterChannel {
+class NASTIResponseChannel extends NASTISlaveToMasterChannel with HasNASTIId with HasNASTIUser {
   val resp = UInt(width = nastiXRespBits)
 }
 
-class NASTIWriteAddressChannel extends NASTIAddressChannel {
-  val id   = UInt(width = nastiWIdBits)
-  val user = UInt(width = nastiAWUserBits)
-}
+class NASTILiteWriteAddressChannel extends NASTIAddressChannel
+class NASTIWriteAddressChannel extends NASTILiteWriteAddressChannel with HasNASTIMetadata
 
-class NASTIWriteDataChannel extends NASTIMasterToSlaveChannel with HasNASTIData {
+class NASTILiteReadAddressChannel extends NASTIAddressChannel
+class NASTIReadAddressChannel extends NASTILiteReadAddressChannel with HasNASTIMetadata
+
+class NASTILiteWriteDataChannel extends NASTIMasterToSlaveChannel with HasNASTIData with HasNASTIUser {
   val strb = UInt(width = nastiWStrobeBits)
-  val user = UInt(width = nastiWUserBits)
 }
+class NASTIWriteDataChannel extends NASTILiteWriteDataChannel with HasNASTILast
 
-class NASTIWriteResponseChannel extends NASTIResponseChannel {
-  val id   = UInt(width = nastiWIdBits)
-  val user = UInt(width = nastiBUserBits)
-}
+class NASTILiteWriteResponseChannel extends NASTIResponseChannel
+class NASTIWriteResponseChannel extends NASTILiteWriteResponseChannel
 
-class NASTIReadAddressChannel extends NASTIAddressChannel {
-  val id   = UInt(width = nastiRIdBits)
-  val user = UInt(width = nastiARUserBits)
-}
+class NASTILiteReadDataChannel extends NASTIResponseChannel with HasNASTIData
+class NASTIReadDataChannel extends NASTILiteReadDataChannel with HasNASTILast
 
-class NASTIReadDataChannel extends NASTIResponseChannel with HasNASTIData {
-  val id   = UInt(width = nastiRIdBits)
-  val user = UInt(width = nastiRUserBits)
-}
-
+//---------------------- Converters ------------------------//
 class MemIONASTISlaveIOConverter extends MIFModule with NASTIParameters {
   val io = new Bundle {
     val nasti = new NASTISlaveIO
