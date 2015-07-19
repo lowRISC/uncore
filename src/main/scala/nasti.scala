@@ -17,6 +17,7 @@ case object NASTIUserBits extends Field[Int]
 trait NASTIParameters extends UsesParameters {
   val nastiXDataBits = params(NASTIDataBits)
   val nastiWStrobeBits = nastiXDataBits / 8
+  val nastiXOffBits = log2Up(nastiWStrobeBits)
   val nastiXAddrBits = params(NASTIAddrBits)
   val nastiXIdBits = params(NASTIIdBits)
   val nastiXUserBits = params(NASTIUserBits)
@@ -313,4 +314,58 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
     g_type = Mux(io.nasti.b.bits.id(0), Grant.voluntaryAckType, Grant.putAckType),
     client_xact_id = io.nasti.b.bits.id >> UInt(1),
     manager_xact_id = UInt(0))
+}
+
+class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
+  val io = new Bundle {
+    val tl = new ManagerTileLinkIO
+    val nasti = new NASTILiteMasterIO
+  }
+
+  // request (transmit) states
+  val t_idle :: t_req0 :: t_req1 :: t_busy :: Nil = Enum(UInt(), 4)
+  val t_state = Reg(init=t_idle)
+
+  // response (receiver) states
+  val r_idle :: r_resp0 :: r_resp1 :: Nil = Enum(UInt(), 3)
+  val r_state = Reg(init=r_idle)
+
+  // internal transaction information
+  val addr = RegEnable(io.tl.acquire.bits.full_addr(), io.tl.acquire.valid)
+  val client_id = RegEnable(io.tl.acquire.bits.client_id, io.tl.acquire.valid)
+  val client_xact_id = RegEnable(io.tl.acquire.bits.client_xact_id, io.tl.acquire.valid)
+  val grant_type = RegEnable(io.tl.acquire.bits.getBuiltInGrantType(), io.tl.acquire.valid)
+  val op_size = RegEnable(io.tl.acquire.bits.op_size(), io.tl.acquire.valid)
+  val data_buf = RegEnable(io.nasti.r.bits.data, r_state === r_resp0 && io.nasti.r.valid && op_size === MT_D) // 64-bit
+
+  // set initial values for ports
+  io.tl.acquire.ready := t_state === t_idle
+  io.tl.probe.valid := Bool(false)
+  io.tl.release.ready := Bool(false)
+  io.tl.grant.valid := Bool(false)
+  io.tl.finish.ready := Bool(true)
+
+  io.nasti.aw.valid := Bool(false)
+  io.nasti.w.valid := Bool(false)
+  io.nasti.b.ready := Bool(false)
+  io.nasti.ar.valid := Bool(false)
+  io.nasti.r.ready := Bool(false)
+
+  // request state machine
+  switch(t_state) {
+    is(t_idle) {
+      when(io.tl.acquire.valid) {
+        t_state := t_req0
+      }
+    }
+    is(t_req0) {
+      when(grant_type === Grant.putAckType && io.nasti.aw.ready) { // write operation
+        t_state := Mux(op_size === M_D, t_req1, t_busy)
+      }
+    }
+  }
+
+
+  // response state machine
+
 }
