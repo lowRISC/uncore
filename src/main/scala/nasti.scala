@@ -316,34 +316,33 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
     manager_xact_id = UInt(0))
 }
 
-class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
+class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters with TileLinkParameters {
   val io = new Bundle {
     val tl = new ManagerTileLinkIO
     val nasti = new NASTILiteMasterIO
   }
+
+  require(nastiXDataBits == 32)
 
   // request (transmit) states
   val t_idle :: t_req0 :: t_req1 :: t_busy :: Nil = Enum(UInt(), 4)
   val t_state = Reg(init=t_idle)
 
   // response (receiver) states
-  val r_idle :: r_resp0 :: r_resp1 :: Nil = Enum(UInt(), 3)
+  val r_idle :: r_resp0 :: r_resp1 :: r_grant :: Nil = Enum(UInt(), 4)
   val r_state = Reg(init=r_idle)
 
   // internal transaction information
-  val addr = RegEnable(io.tl.acquire.bits.full_addr(), io.tl.acquire.valid)
+  val addr = io.tl.acquire.bits.full_addr()
   val client_id = RegEnable(io.tl.acquire.bits.client_id, io.tl.acquire.valid)
   val client_xact_id = RegEnable(io.tl.acquire.bits.client_xact_id, io.tl.acquire.valid)
   val grant_type = RegEnable(io.tl.acquire.bits.getBuiltInGrantType(), io.tl.acquire.valid)
   val op_size = RegEnable(io.tl.acquire.bits.op_size(), io.tl.acquire.valid)
-  val data_buf = RegEnable(io.nasti.r.bits.data, r_state === r_resp0 && io.nasti.r.valid && op_size === MT_D) // 64-bit
+  val data_buf = RegEnable(io.nasti.r.bits.data, r_state === r_resp0 && io.nasti.r.valid && op_size === MT_D) // the higher 32-bit for 64-bit read
 
   // set initial values for ports
-  io.tl.acquire.ready := t_state === t_idle
   io.tl.probe.valid := Bool(false)
   io.tl.release.ready := Bool(false)
-  io.tl.grant.valid := Bool(false)
-  io.tl.finish.ready := Bool(true)
 
   io.nasti.aw.valid := Bool(false)
   io.nasti.w.valid := Bool(false)
@@ -351,21 +350,112 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
   io.nasti.ar.valid := Bool(false)
   io.nasti.r.ready := Bool(false)
 
+  // drive IOs according to states
+
+  // tl.Acquire
+  io.tl.acquire.ready := t_state === t_busy && io.tl.acquire.valid // key addr and dara valid
+
+  // tl.Grant
+  io.tl.grant.valid := r_state === r_grant
+  io.tl.grant.bits := Mux(grant_type === Grant.putAckType,
+    Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0)),
+    Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0), UInt(0),
+          Cat(Mux(op_size === M_D, data_buf, UInt(0)), io.nasti.r.bits.data)))
+
+  // tl.Finish
+  io.tl.finish.ready := Bool(true)
+
+  // NASTI.AW
+  val aw_fire = Reg(Bool)
+  aw_fire := io.nasti.aw.fire()
+  io.nasti.aw.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~aw_fire
+  io.nasti.aw.bits.id := UInt(0)
+  io.nasti.aw.bits.addr := Mux(op_size === M_D && t_state === t_req0,
+    addr | Cat(UInt(1), UInt(0, nastiXOffBits)), addr)
+  io.nasti.aw.bits.prot := UInt("b000")
+  io.nasti.aw.bits.region := UInt("b0000")
+  io.nasti.aw.bits.user := UInt(0)
+  
+  // NASTI.W
+  val.w_fire = Reg(Bool)
+  w_fire := io.nasti.w.fire()
+  io.nasti.w.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~w_fire
+
+  val data_vec = (0 until tlDataBits/nastiXDataBits).map(i =>
+    io.tl.acquire.bits.data(i*nastiXDataBits + nastiXDataBits - 1, i*nastiXDataBits))
+  io.nasti.w.bits.data := data_vec(io.nasti.aw.bits.addr(tlBeatAddrBits-1, nastiXOffBits))
+
+  val mask_vec = (0 until tlDataBits/nastiXDataBits).map(i =>
+    io.tl.acquire.bits.wmask()(i*nastiWStrobeBits + nastiWStrobeBits - 1, i*nastiWStrobeBits))
+  io.nasti.w.bits.strb := mask_vec(io.nasti.aw.bits.addr(tlBeatAddrBits-1, nastiXOffBits))
+
+  // the write address and data combined fire
+  val wr_fire = (io.nasti.aw.fire() || aw_fire) && (io.nasti.w.fire() || w_fire)
+
+  // NASTI.AR
+  io.nasti.ar.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.getDataBeatType
+  io.nasti.ar.bits := io.nasti.aw.bits
+
+  // NASTI.B
+  io.nasti.b.ready := (r_state === r_resp0 || r_state === r_resp1) && grant_type === Grant.putAckType
+
+  // NASTI.R
+  io.nasti.r.ready := (r_state === r_resp0 || r_state === r_resp1) && grant_type === Grant.getDataBeatType
+  when(r_state === r_resp0 && Grant.getDataBeatType && op_size === M_D && io.nastio.r.valid) {
+    data_buf := io.nasti.r.bits.data
+  }
+
   // request state machine
   switch(t_state) {
     is(t_idle) {
       when(io.tl.acquire.valid) {
         t_state := t_req0
+        aw_fire := Bool(false)
+        w_fire := Bool(false)
       }
     }
     is(t_req0) {
-      when(grant_type === Grant.putAckType && io.nasti.aw.ready) { // write operation
+      when(wr_fire || io.nasti.ar.fire()) {
         t_state := Mux(op_size === M_D, t_req1, t_busy)
+        aw_fire := Bool(false)
+        w_fire := Bool(false)
+      }
+    }
+    is(t_req1) {
+      when(wr_fire || io.nasti.ar.fire()) {
+        t_state := t_busy
+        aw_fire := Bool(false)
+        w_fire := Bool(false)
+      }
+    }
+    is(t_busy) {
+      when(io.tl.grant.fire()) {
+        t_state := t_idle
       }
     }
   }
 
-
   // response state machine
-
+  switch(r_state) {
+    is(r_idle) {
+      when(io.nasti.aw.fire() || io.nasti.ar.fire()) {
+        r_state := r_resp0
+      }
+    }
+    is(r_resp0) {
+      when(io.nasti.b.fire() || io.nasti.r.fire()) {
+        r_state := Mux(op_size === M_D, r_resp1, r_grant)
+      }
+    }
+    is(r_resp1) {
+      when(io.nasti.b.fire() || io.nasti.r.fire()) {
+        r_state := r_grant
+      }
+    }
+    is(r_grant) {
+      when(io.tl.grant.fire()) {
+        r_state := r_idle
+      }
+    }
+  }
 }
