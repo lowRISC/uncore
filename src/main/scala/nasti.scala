@@ -360,34 +360,34 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
   io.tl.grant.bits := Mux(grant_type === Grant.putAckType,
     Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0)),
     Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0), UInt(0),
-          Cat(Mux(op_size === M_D, data_buf, UInt(0)), io.nasti.r.bits.data)))
+          Cat(Mux(op_size === MT_D, data_buf, UInt(0)), io.nasti.r.bits.data)))
 
   // tl.Finish
   io.tl.finish.ready := Bool(true)
 
   // NASTI.AW
-  val aw_fire = Reg(Bool)
+  val aw_fire = Reg(Bool())
   aw_fire := io.nasti.aw.fire()
   io.nasti.aw.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~aw_fire
   io.nasti.aw.bits.id := UInt(0)
-  io.nasti.aw.bits.addr := Mux(op_size === M_D && t_state === t_req0,
+  io.nasti.aw.bits.addr := Mux(op_size === MT_D && t_state === t_req0,
     addr | Cat(UInt(1), UInt(0, nastiXOffBits)), addr)
   io.nasti.aw.bits.prot := UInt("b000")
   io.nasti.aw.bits.region := UInt("b0000")
   io.nasti.aw.bits.user := UInt(0)
   
   // NASTI.W
-  val.w_fire = Reg(Bool)
+  val w_fire = Reg(Bool())
   w_fire := io.nasti.w.fire()
   io.nasti.w.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~w_fire
 
-  val data_vec = (0 until tlDataBits/nastiXDataBits).map(i =>
-    io.tl.acquire.bits.data(i*nastiXDataBits + nastiXDataBits - 1, i*nastiXDataBits))
-  io.nasti.w.bits.data := data_vec(io.nasti.aw.bits.addr(tlBeatAddrBits-1, nastiXOffBits))
+  val data_vec = Vec((0 until tlDataBits/nastiXDataBits).map(i =>
+    io.tl.acquire.bits.data(i*nastiXDataBits + nastiXDataBits - 1, i*nastiXDataBits)))
+  io.nasti.w.bits.data := data_vec(io.nasti.aw.bits.addr(tlByteAddrBits-1, nastiXOffBits))
 
-  val mask_vec = (0 until tlDataBits/nastiXDataBits).map(i =>
-    io.tl.acquire.bits.wmask()(i*nastiWStrobeBits + nastiWStrobeBits - 1, i*nastiWStrobeBits))
-  io.nasti.w.bits.strb := mask_vec(io.nasti.aw.bits.addr(tlBeatAddrBits-1, nastiXOffBits))
+  val mask_vec = Vec((0 until tlDataBits/nastiXDataBits).map(i =>
+    io.tl.acquire.bits.wmask()(i*nastiWStrobeBits + nastiWStrobeBits - 1, i*nastiWStrobeBits)))
+  io.nasti.w.bits.strb := mask_vec(io.nasti.aw.bits.addr(tlByteAddrBits-1, nastiXOffBits))
 
   // the write address and data combined fire
   val wr_fire = (io.nasti.aw.fire() || aw_fire) && (io.nasti.w.fire() || w_fire)
@@ -401,7 +401,7 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
 
   // NASTI.R
   io.nasti.r.ready := (r_state === r_resp0 || r_state === r_resp1) && grant_type === Grant.getDataBeatType
-  when(r_state === r_resp0 && Grant.getDataBeatType && op_size === M_D && io.nastio.r.valid) {
+  when(r_state === r_resp0 && grant_type === Grant.getDataBeatType && op_size === MT_D && io.nasti.r.valid) {
     data_buf := io.nasti.r.bits.data
   }
 
@@ -416,7 +416,7 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
     }
     is(t_req0) {
       when(wr_fire || io.nasti.ar.fire()) {
-        t_state := Mux(op_size === M_D, t_req1, t_busy)
+        t_state := Mux(op_size === MT_D, t_req1, t_busy)
         aw_fire := Bool(false)
         w_fire := Bool(false)
       }
@@ -444,7 +444,7 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
     }
     is(r_resp0) {
       when(io.nasti.b.fire() || io.nasti.r.fire()) {
-        r_state := Mux(op_size === M_D, r_resp1, r_grant)
+        r_state := Mux(op_size === MT_D, r_resp1, r_grant)
       }
     }
     is(r_resp1) {
