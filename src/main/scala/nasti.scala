@@ -39,6 +39,15 @@ trait NASTIParameters extends UsesParameters {
     UInt(32) -> UInt(5),
     UInt(64) -> UInt(6),
     UInt(128) -> UInt(7)))
+
+  def opSizeToXSize(s: UInt) = MuxLookup(s, UInt("b111"), Array(
+    MT_B  -> UInt(0),
+    MT_H  -> UInt(1),
+    MT_W  -> UInt(2),
+    MT_D  -> UInt(3),
+    MT_BU -> UInt(0),
+    MT_HU -> UInt(1),
+    MT_WU -> UInt(2)))
 }
 
 abstract class NASTIBundle extends Bundle with NASTIParameters
@@ -196,6 +205,8 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   val tag_out = Reg(UInt(width = nastiXIdBits))
   val addr_out = Reg(UInt(width = nastiXAddrBits))
   val has_data = Reg(init=Bool(false))
+  val len_out = Reg(UInt(width = nastiXLenBits))
+  val size_out = Reg(UInt(width = nastiXSizeBits))
   val data_from_rel = Reg(init=Bool(false))
   val (tl_cnt_out, tl_wrap_out) =
     Counter((io.tl.acquire.fire() && acq_has_data) ||
@@ -204,8 +215,8 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
 
   io.nasti.ar.bits.id := tag_out
   io.nasti.ar.bits.addr := addr_out
-  io.nasti.ar.bits.len := Mux(has_data, UInt(tlDataBeats-1), UInt(0)) 
-  io.nasti.ar.bits.size := UInt(log2Ceil(tlDataBits))
+  io.nasti.ar.bits.len := len_out
+  io.nasti.ar.bits.size := size_out
   io.nasti.ar.bits.burst := UInt("b01")
   io.nasti.ar.bits.lock := Bool(false)
   io.nasti.ar.bits.cache := UInt("b0000")
@@ -240,11 +251,13 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
                        io.tl.release.bits.isVoluntary())
         val addr = io.tl.release.bits.full_addr()
         io.nasti.aw.bits.id := tag
-        io.nasti.aw.bits.addr := addr
-        io.nasti.aw.bits.len := UInt(tlDataBeats-1)
-        io.nasti.aw.bits.size := MT_Q
         tag_out := tag
+        io.nasti.aw.bits.addr := addr
         addr_out := addr
+        io.nasti.aw.bits.len := UInt(tlDataBeats-1)
+        len_out := UInt(tlDataBeats-1)
+        io.nasti.aw.bits.size := bytesToXSize(UInt(tlDataBytes))
+        size_out := io.nasti.aw.bits.size
         has_data := rel_has_data
       } .elsewhen(io.tl.acquire.valid) {
         data_from_rel := Bool(false)
@@ -259,13 +272,17 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
           io.nasti.aw.bits.addr := addr
           io.nasti.aw.bits.len := Mux(io.tl.acquire.bits.isBuiltInType(Acquire.putBlockType),
                                     UInt(tlDataBeats-1), UInt(0)) 
+          len_out := io.nasti.aw.bits.len
           io.nasti.aw.bits.size := bytesToXSize(PopCount(io.tl.acquire.bits.wmask()))
+          size_out := io.nasti.aw.bits.size
         } .otherwise {
           io.nasti.ar.bits.id := tag
           io.nasti.ar.bits.addr := addr
-          io.nasti.ar.bits.len := Mux(io.tl.acquire.bits.isBuiltInType(Acquire.getBlockType),
+          io.nasti.ar.bits.len := Mux(io.tl.acquire.bits.isBuiltInType(Acquire.getBlockType) || !io.tl.acquire.bits.isBuiltInType(),
                                     UInt(tlDataBeats-1), UInt(0)) 
-          io.nasti.ar.bits.size := io.tl.acquire.bits.op_size()
+          len_out := io.nasti.ar.bits.len
+          io.nasti.ar.bits.size := Mux(io.tl.acquire.bits.isBuiltInType(), opSizeToXSize(io.tl.acquire.bits.op_size()), bytesToXSize(UInt(tlDataBytes)))
+          size_out := io.nasti.ar.bits.size
         }
         tag_out := tag
         addr_out := addr
