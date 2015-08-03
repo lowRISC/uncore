@@ -1378,7 +1378,7 @@ class SuperChannelInputMultiplexer
   arb.io.in(2).valid := io.tl.acquire.valid
   arb.io.in(2).bits.header := io.tl.acquire.bits.header
   arb.io.in(2).bits.payload := SuperChannel(io.tl.acquire.bits.payload)
-  io.tl.acquire.ready := arb.io.in(1).ready
+  io.tl.acquire.ready := arb.io.in(2).ready
 
   arb.io.out <> io.su
 

@@ -391,6 +391,7 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
     addr | Cat(UInt(1), UInt(0, nastiXOffBits)), addr)
   io.nasti.aw.bits.prot := UInt("b000")
   io.nasti.aw.bits.region := UInt("b0000")
+  io.nasti.aw.bits.qos := UInt("b0000")
   io.nasti.aw.bits.user := UInt(0)
   
   // NASTI.W
