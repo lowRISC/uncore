@@ -377,7 +377,7 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
   io.tl.grant.bits := Mux(grant_type === Grant.putAckType,
     Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0)),
     Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0), UInt(0),
-          Cat(Mux(op_size === MT_D, data_buf, UInt(0)), io.nasti.r.bits.data)))
+          Cat(Mux(op_size === MT_D, data_buf, io.nasti.r.bits.data), io.nasti.r.bits.data))) // return data always aligns with 64-bit boundary
 
   // tl.Finish
   io.tl.finish.ready := Bool(true)
