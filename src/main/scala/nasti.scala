@@ -478,20 +478,20 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
       }
     }
     is(r_resp0) {
-      when(io.nasti.r.fire()) {
+      when(io.nasti.r.valid) {
         r_state := Mux(op_size === MT_D, r_resp1, r_grant)
       }
-      when(io.nasti.b.fire()) {
+      when(io.nasti.b.valid) {
         r_state := Mux(double_write, r_resp1, r_grant)
       }
     }
     is(r_resp1) {
-      when(io.nasti.b.fire() || io.nasti.r.fire()) {
+      when(io.nasti.b.valid || io.nasti.r.valid) {
         r_state := r_grant
       }
     }
     is(r_grant) {
-      when(io.tl.grant.fire()) {
+      when(io.tl.grant.valid) {
         r_state := r_idle
       }
     }
