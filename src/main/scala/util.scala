@@ -104,3 +104,25 @@ object FlowThroughSerializer {
     fs.io.out
   }
 } 
+
+class DecoupledPipe[T <: Data] (gen: T) extends Module {
+  val io = new Bundle {
+    val pi = Decoupled(gen.clone).flip
+    val po = Decoupled(gen.clone)
+  }
+
+  val valid = Reg(init=Bool(false))
+  val bits = Reg(gen.clone)
+
+  io.pi.ready := !valid || io.po.ready
+  io.po.valid := valid
+  io.po.bits := bits
+
+  when(io.pi.fire()) {
+    valid := Bool(true)
+    bits := io.pi.bits
+  } .elsewhen(io.po.fire()) {
+    valid := Bool(false)
+  }
+
+}
