@@ -505,35 +505,23 @@ class NASTIPipe extends NASTIModule {
     val master = new NASTIMasterIO
   }
 
-  def hook[T <: Data] (chi: DecoupledIO[T], cho:DecoupledIO[T]) = {
-    //val bits = Reg(next=chi.bits)
-    //val valid = Reg(next=chi.valid)
-    //val ready = Reg(next=cho.ready)
-    val bits = chi.bits
-    val valid = chi.valid
-    val ready = cho.ready
-    chi.ready := ready
-    cho.valid := valid
-    cho.bits := bits
-  }
-
-  val awPipe = Module(new DecoupledPipe(io.slave.aw))
+  val awPipe = Module(new DecoupledPipe(io.slave.aw.bits))
   awPipe.io.pi <> io.slave.aw
   awPipe.io.po <> io.master.aw
 
-  val wPipe = Module(new DecoupledPipe(io.slave.w))
+  val wPipe = Module(new DecoupledPipe(io.slave.w.bits))
   wPipe.io.pi <> io.slave.w
   wPipe.io.po <> io.master.w
 
-  val bPipe = Module(new DecoupledPipe(io.master.b))
+  val bPipe = Module(new DecoupledPipe(io.slave.b.bits))
   bPipe.io.pi <> io.master.b
   bPipe.io.po <> io.slave.b
 
-  val arPipe = Module(new DecoupledPipe(io.slave.ar))
+  val arPipe = Module(new DecoupledPipe(io.slave.ar.bits))
   arPipe.io.pi <> io.slave.ar
   arPipe.io.po <> io.master.ar
 
-  val rPipe = Module(new DecoupledPipe(io.master.r))
+  val rPipe = Module(new DecoupledPipe(io.master.r.bits))
   rPipe.io.pi <> io.master.r
   rPipe.io.po <> io.slave.r
 
