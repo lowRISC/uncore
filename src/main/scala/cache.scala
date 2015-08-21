@@ -3,6 +3,7 @@
 package uncore
 import Chisel._
 import scala.reflect.ClassTag
+import junctions._
 
 abstract trait CacheParameters extends UsesParameters {
   val nSets = params(NSets)
@@ -22,7 +23,7 @@ abstract trait CacheParameters extends UsesParameters {
 abstract class CacheBundle extends Bundle with CacheParameters
 abstract class CacheModule extends Module with CacheParameters
 
-class StoreGen(typ: Bits, addr: Bits, dat: Bits) {
+class StoreGen(typ: UInt, addr: UInt, dat: UInt) {
   val byte = typ === MT_B || typ === MT_BU
   val half = typ === MT_H || typ === MT_HU
   val word = typ === MT_W || typ === MT_WU
@@ -40,7 +41,7 @@ class StoreGen(typ: Bits, addr: Bits, dat: Bits) {
                       dat)
 }
 
-class LoadGen(typ: Bits, addr: Bits, dat: Bits, zero: Bool) {
+class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool) {
   val t = new StoreGen(typ, addr, dat)
   val sign = typ === MT_B || typ === MT_H || typ === MT_W || typ === MT_D
 
@@ -73,7 +74,7 @@ class AMOALU extends CacheModule {
   val word = io.typ === MT_W || io.typ === MT_WU || // Logic minimization:
                io.typ === MT_B || io.typ === MT_BU
 
-  val mask = SInt(-1,64) ^ (io.addr(2) << UInt(31))
+  val mask = ~UInt(0,64) ^ (io.addr(2) << 31)
   val adder_out = (io.lhs & mask).toUInt + (rhs & mask)
 
   val cmp_lhs  = Mux(word && !io.addr(2), io.lhs(31), io.lhs(63))
@@ -102,7 +103,7 @@ abstract class ReplacementPolicy {
 }
 
 class RandomReplacement(ways: Int) extends ReplacementPolicy {
-  private val replace = Bool()
+  private val replace = Wire(Bool())
   replace := Bool(false)
   val lfsr = LFSR16(replace)
 
@@ -122,31 +123,31 @@ class MetaReadReq extends CacheBundle {
 
 class MetaWriteReq[T <: Metadata](gen: T) extends MetaReadReq {
   val way_en = Bits(width = nWays)
-  val data = gen.clone
-  override def clone = new MetaWriteReq(gen).asInstanceOf[this.type]
+  val data = gen.cloneType
+  override def cloneType = new MetaWriteReq(gen).asInstanceOf[this.type]
 }
 
 class MetadataArray[T <: Metadata](makeRstVal: () => T) extends CacheModule {
   val rstVal = makeRstVal()
   val io = new Bundle {
     val read = Decoupled(new MetaReadReq).flip
-    val write = Decoupled(new MetaWriteReq(rstVal.clone)).flip
-    val resp = Vec.fill(nWays){rstVal.clone.asOutput}
+    val write = Decoupled(new MetaWriteReq(rstVal)).flip
+    val resp = Vec.fill(nWays){rstVal.cloneType.asOutput}
   }
   val rst_cnt = Reg(init=UInt(0, log2Up(nSets+1)))
   val rst = rst_cnt < UInt(nSets)
   val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
   val wdata = Mux(rst, rstVal, io.write.bits.data).toBits
-  val wmask = Mux(rst, SInt(-1), io.write.bits.way_en).toUInt
+  val wmask = Mux(rst, SInt(-1), io.write.bits.way_en.toSInt).toUInt
   when (rst) { rst_cnt := rst_cnt+UInt(1) }
 
   val metabits = rstVal.getWidth
-  val tag_arr = Mem(UInt(width = metabits*nWays), nSets, seqRead = true)
+  val tag_arr = SeqMem(UInt(width = metabits*nWays), nSets)
   when (rst || io.write.valid) {
     tag_arr.write(waddr, Fill(nWays, wdata), FillInterleaved(metabits, wmask))
   }
 
-  val tags = tag_arr(RegEnable(io.read.bits.idx, io.read.valid))
+  val tags = tag_arr.read(io.read.bits.idx, io.read.valid)
   io.resp := io.resp.fromBits(tags)
   io.read.ready := !rst && !io.write.valid // so really this could be a 6T RAM
   io.write.ready := !rst
@@ -173,7 +174,7 @@ abstract class L2HellaCacheModule extends Module with L2HellaCacheParameters {
   def doInternalOutputArbitration[T <: Data : ClassTag](
       out: DecoupledIO[T],
       ins: Seq[DecoupledIO[T]]) {
-    val arb = Module(new RRArbiter(out.bits.clone, ins.size))
+    val arb = Module(new RRArbiter(out.bits, ins.size))
     out <> arb.io.out
     arb.io.in <> ins 
   }
@@ -211,7 +212,7 @@ class L2Metadata extends Metadata with L2HellaCacheParameters {
 
 object L2Metadata {
   def apply(tag: Bits, coh: HierarchicalMetadata) = {
-    val meta = new L2Metadata
+    val meta = Wire(new L2Metadata)
     meta.tag := tag
     meta.coh := coh
     meta
@@ -224,7 +225,7 @@ class L2MetaReadReq extends MetaReadReq with HasL2Id {
 
 class L2MetaWriteReq extends MetaWriteReq[L2Metadata](new L2Metadata)
     with HasL2Id {
-  override def clone = new L2MetaWriteReq().asInstanceOf[this.type]
+  override def cloneType = new L2MetaWriteReq().asInstanceOf[this.type]
 }
 
 class L2MetaResp extends L2HellaCacheBundle
@@ -304,21 +305,16 @@ class L2DataRWIO extends L2HellaCacheBundle with HasL2DataReadIO with HasL2DataW
 class L2DataArray(delay: Int) extends L2HellaCacheModule {
   val io = new L2DataRWIO().flip
 
-  val wmask = FillInterleaved(8, io.write.bits.wmask)
-  val reg_raddr = Reg(UInt())
-  val array = Mem(Bits(width=rowBits), nWays*nSets*refillCycles, seqRead = true)
-  val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.addr_idx, io.write.bits.addr_beat)
+  val array = SeqMem(Bits(width=rowBits), nWays*nSets*refillCycles)
+  val ren = !io.write.valid && io.read.valid
   val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.addr_idx, io.read.bits.addr_beat)
-
-  when (io.write.bits.way_en.orR && io.write.valid) {
-    array.write(waddr, io.write.bits.data, wmask)
-  }.elsewhen (io.read.bits.way_en.orR && io.read.valid) {
-    reg_raddr := raddr
-  }
+  val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.addr_idx, io.write.bits.addr_beat)
+  val wmask = FillInterleaved(8, io.write.bits.wmask)
+  when (io.write.valid) { array.write(waddr, io.write.bits.data, wmask) }
 
   val r_req = Pipe(io.read.fire(), io.read.bits)
   io.resp := Pipe(r_req.valid, r_req.bits, delay)
-  io.resp.bits.data := Pipe(r_req.valid, array(reg_raddr), delay).bits
+  io.resp.bits.data := Pipe(r_req.valid, array.read(raddr, ren), delay).bits
   io.read.ready := !io.write.valid
   io.write.ready := Bool(true)
 }
@@ -433,13 +429,13 @@ abstract class L2XactTracker extends XactTracker with L2HellaCacheParameters {
   def connectInternalDataBeatCounter[T <: HasL2BeatAddr](
       in: DecoupledIO[T],
       beat: UInt = UInt(0),
-      full_block: Bool = Bool(true)) = {
+      full_block: Bool = Bool(true)): (UInt, Bool) = {
     connectDataBeatCounter(in.fire(), in.bits, beat, full_block)
   }
 
   def connectInternalDataBeatCounter[T <: HasL2Data](
       in: ValidIO[T],
-      full_block: Bool = Bool(true)) = {
+      full_block: Bool): Bool = {
     connectDataBeatCounter(in.valid, in.bits, UInt(0), full_block)._2
   }
 
@@ -483,7 +479,7 @@ class L2VoluntaryReleaseTracker(trackerId: Int) extends L2XactTracker {
   val state = Reg(init=s_idle)
 
   val xact = Reg(Bundle(new ReleaseFromSrc, { case TLId => params(InnerTLId); case TLDataBits => 0 }))
-  val data_buffer = Vec.fill(innerDataBeats){ Reg(init=UInt(0, width = innerDataBits)) }
+  val data_buffer = Reg(init=Vec.fill(innerDataBeats){UInt(0, width = innerDataBits)})
   val xact_way_en = Reg{ Bits(width = nWays) }
   val xact_old_meta = Reg{ new L2Metadata }
   val coh = xact_old_meta.coh
@@ -578,12 +574,12 @@ class L2AcquireTracker(trackerId: Int) extends L2XactTracker {
 
   // State holding transaction metadata
   val xact = Reg(Bundle(new AcquireFromSrc, { case TLId => params(InnerTLId) }))
-  val data_buffer = Vec.fill(innerDataBeats){ Reg(init=UInt(0, width = innerDataBits)) }
-  val wmask_buffer = Vec.fill(innerDataBeats){ Reg(init=UInt(0,width = innerDataBits/8)) }
+  val data_buffer = Reg(init=Vec.fill(innerDataBeats){UInt(0, width = innerDataBits)})
+  val wmask_buffer = Reg(init=Vec.fill(innerDataBeats){UInt(0, width = innerDataBits/8)})
   val xact_tag_match = Reg{ Bool() }
   val xact_way_en = Reg{ Bits(width = nWays) }
   val xact_old_meta = Reg{ new L2Metadata }
-  val pending_coh = Reg{ xact_old_meta.coh.clone }
+  val pending_coh = Reg{ xact_old_meta.coh }
 
   // Secondary miss queue
   val ignt_q = Module(new Queue(new SecondaryMissInfo, nSecondaryMisses))(innerTLParams)
@@ -861,6 +857,7 @@ class L2AcquireTracker(trackerId: Int) extends L2XactTracker {
   val pending_coh_on_hit = HierarchicalMetadata(
     io.meta.resp.bits.meta.coh.inner,
     io.meta.resp.bits.meta.coh.outer.onHit(xact.op_code()))
+  val pending_coh_on_miss = HierarchicalMetadata.onReset
 
   // State machine updates and transaction handler metadata intialization
   when(state === s_idle && io.inner.acquire.valid) {
@@ -872,9 +869,9 @@ class L2AcquireTracker(trackerId: Int) extends L2XactTracker {
       UInt(0))
     pending_reads := Mux( // GetBlocks and custom types read all beats
       io.iacq().isBuiltInType(Acquire.getBlockType) || !io.iacq().isBuiltInType(),
-      SInt(-1, width = innerDataBeats),
+      SInt(-1),
       (addPendingBitWhenBeatIsGetOrAtomic(io.inner.acquire) | 
-        addPendingBitWhenBeatHasPartialWritemask(io.inner.acquire)).toUInt)
+        addPendingBitWhenBeatHasPartialWritemask(io.inner.acquire)).toSInt).toUInt
     pending_writes := addPendingBitWhenBeatHasDataAndAllocs(io.inner.acquire)
     pending_resps := UInt(0)
     pending_ignt_data := UInt(0)
@@ -897,7 +894,7 @@ class L2AcquireTracker(trackerId: Int) extends L2XactTracker {
                              coh.inner.requiresProbesOnVoluntaryWriteback())
     val needs_inner_probes = tag_match && coh.inner.requiresProbes(xact)
     when(!tag_match || is_hit && pending_coh_on_hit != coh) { pending_meta_write := Bool(true) }
-    pending_coh := Mux(is_hit, pending_coh_on_hit, coh)
+    pending_coh := Mux(is_hit, pending_coh_on_hit, Mux(tag_match, coh, pending_coh_on_miss))
     when(needs_inner_probes) {
       val full_sharers = coh.inner.full()
       val mask_self = Mux(
@@ -970,7 +967,7 @@ class L2WritebackUnit(trackerId: Int) extends L2XactTracker {
   val state = Reg(init=s_idle)
 
   val xact = Reg(new L2WritebackReq)
-  val data_buffer = Vec.fill(innerDataBeats){ Reg(init=UInt(0, width = innerDataBits)) }
+  val data_buffer = Reg(init=Vec.fill(innerDataBeats){UInt(0, width = innerDataBits)})
   val xact_addr_block = Cat(xact.tag, xact.idx)
 
   val pending_irels =
@@ -998,8 +995,10 @@ class L2WritebackUnit(trackerId: Int) extends L2XactTracker {
   io.inner.release.ready := state === s_inner_probe || state === s_busy
   when(io.inner.release.fire()) {
     xact.coh.inner := inner_coh_on_irel
-    when(io.irel().hasData()) { xact.coh.outer := outer_coh_on_irel } // WB is a write
     data_buffer(io.inner.release.bits.addr_beat) := io.inner.release.bits.data
+  }
+  when(io.inner.release.valid && io.irel().conflicts(xact_addr_block) && io.irel().hasData()) {
+    xact.coh.outer := outer_coh_on_irel // must writeback dirty data supplied by any matching release, even voluntary ones
   }
 
   // If a release didn't write back data, have to read it from data array

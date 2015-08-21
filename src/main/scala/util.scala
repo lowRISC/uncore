@@ -44,8 +44,8 @@ object ZCounter {
 
 class FlowThroughSerializer[T <: HasTileLinkData](gen: T, n: Int) extends Module {
   val io = new Bundle {
-    val in = Decoupled(gen.clone).flip
-    val out = Decoupled(gen.clone)
+    val in = Decoupled(gen).flip
+    val out = Decoupled(gen)
     val cnt = UInt(OUTPUT, log2Up(n))
     val done = Bool(OUTPUT)
   }
@@ -53,13 +53,13 @@ class FlowThroughSerializer[T <: HasTileLinkData](gen: T, n: Int) extends Module
   require(io.in.bits.data.getWidth % narrowWidth == 0)
 
   if(n == 1) {
-    io.in <> io.out
-    io.cnt := UInt(0, width = 1)
+    io.out <> io.in
+    io.cnt := UInt(0)
     io.done := Bool(true)
   } else {
     val cnt = Reg(init=UInt(0, width = log2Up(n)))
     val wrap = cnt === UInt(n-1)
-    val rbits = Reg(io.in.bits.clone)
+    val rbits = Reg{io.in.bits}
     val active = Reg(init=Bool(false))
 
     val shifter = Vec.fill(n){Bits(width = narrowWidth)}

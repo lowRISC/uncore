@@ -7,12 +7,12 @@ trait CoherenceAgentParameters extends UsesParameters {
   val nReleaseTransactors = 1
   val nAcquireTransactors = params(NAcquireTransactors)
   val nTransactors = nReleaseTransactors + nAcquireTransactors
-  def outerTLParams = params.alterPartial({ case TLId => params(OuterTLId)})
+  val outerTLParams = params.alterPartial({ case TLId => params(OuterTLId)})
   val outerDataBeats = outerTLParams(TLDataBeats)
   val outerDataBits = outerTLParams(TLDataBits)
   val outerBeatAddrBits = log2Up(outerDataBeats)
   val outerByteAddrBits = log2Up(outerDataBits/8)
-  def innerTLParams = params.alterPartial({case TLId => params(InnerTLId)})
+  val innerTLParams = params.alterPartial({case TLId => params(InnerTLId)})
   val innerDataBeats = innerTLParams(TLDataBeats)
   val innerDataBits = innerTLParams(TLDataBits)
   val innerBeatAddrBits = log2Up(innerDataBeats)
@@ -28,7 +28,7 @@ trait HasCoherenceAgentWiringHelpers {
       out: DecoupledIO[T],
       ins: Seq[DecoupledIO[T]]) {
     def lock(o: T) = o.hasMultibeatData()
-    val arb = Module(new LockingRRArbiter(out.bits.clone, ins.size, out.bits.tlDataBeats, lock _))
+    val arb = Module(new LockingRRArbiter(out.bits, ins.size, out.bits.tlDataBeats, lock _))
     out <> arb.io.out
     arb.io.in <> ins
   }

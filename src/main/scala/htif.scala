@@ -3,7 +3,7 @@
 package uncore
 
 import Chisel._
-import Node._
+import Chisel.ImplicitConversions._
 import uncore._
 
 case object HTIFWidth extends Field[Int]
@@ -96,7 +96,7 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
     }
   }
 
-  val rx_word_count = (rx_count >> UInt(log2Up(short_request_bits/w)))
+  val rx_word_count = (rx_count >> log2Up(short_request_bits/w))
   val rx_word_done = io.host.in.valid && rx_count(log2Up(short_request_bits/w)-1,0).andR
   val packet_ram_depth = long_request_bits/short_request_bits-1
   val packet_ram = Mem(Bits(width = short_request_bits), packet_ram_depth)
@@ -173,7 +173,7 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
     packet_ram(Cat(cnt, ui))
   }.reverse.reduce(_##_)
 
-  val init_addr = addr.toUInt >> UInt(offsetBits-3)
+  val init_addr = addr.toUInt >> (offsetBits-3)
   io.mem.acquire.valid := state === state_mem_rreq || state === state_mem_wreq
   io.mem.acquire.bits := Mux(cmd === cmd_writemem, 
     PutBlock(
@@ -183,6 +183,11 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
       data = mem_req_data),
     GetBlock(addr_block = init_addr))
   io.mem.grant.ready := Bool(true)
+
+  // real-time counter (which doesn't really belong here...)
+  val rtc = Reg(init=UInt(0,64))
+  val rtc_tick = Counter(params(RTCPeriod)).inc()
+  when (rtc_tick) { rtc := rtc + UInt(1) }
 
   val pcrReadData = Reg(Bits(width = io.cpu(0).pcr_rep.bits.getWidth))
   for (i <- 0 until nCores) {
@@ -197,6 +202,21 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
     cpu.pcr_req.bits.data := pcr_wdata
     cpu.reset := my_reset
 
+    // use pcr port to update core's rtc value periodically
+    val rtc_sent = Reg(init=Bool(false))
+    val rtc_outstanding = Reg(init=Bool(false))
+    when (rtc_tick) { rtc_sent := Bool(false) }
+    when (cpu.pcr_rep.valid) { rtc_outstanding := Bool(false) }
+    when (rtc_outstanding) { cpu.pcr_req.valid := Bool(false) }
+    when (state != state_pcr_req && state != state_pcr_resp && !rtc_sent && !rtc_outstanding) {
+      cpu.pcr_req.valid := Bool(true)
+      cpu.pcr_req.bits.rw := Bool(true)
+      cpu.pcr_req.bits.addr := UInt(pcr_RESET) /* XXX this means write mtime */
+      cpu.pcr_req.bits.data := rtc
+      rtc_sent := cpu.pcr_req.ready
+      rtc_outstanding := cpu.pcr_req.ready
+    }
+
     when (cpu.ipi_rep.ready) {
       my_ipi := Bool(false)
     }
@@ -208,7 +228,7 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
       }
     }
 
-    when (cpu.pcr_req.valid && cpu.pcr_req.ready) {
+    when (state === state_pcr_req && cpu.pcr_req.fire()) {
       state := state_pcr_resp
     }
     when (state === state_pcr_req && me && pcr_addr === UInt(pcr_RESET)) {
@@ -220,14 +240,14 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
     }
 
     cpu.pcr_rep.ready := Bool(true)
-    when (cpu.pcr_rep.valid) {
+    when (state === state_pcr_resp && cpu.pcr_rep.valid) {
       pcrReadData := cpu.pcr_rep.bits
       state := state_tx
     }
   }
 
   val scr_addr = addr(log2Up(nSCR)-1, 0)
-  val scr_rdata = Vec.fill(io.scr.rdata.size){Bits(width = 64)}
+  val scr_rdata = Wire(Vec(Bits(width=64), io.scr.rdata.size))
   for (i <- 0 until scr_rdata.size)
     scr_rdata(i) := io.scr.rdata(i)
   scr_rdata(0) := UInt(nCores)
@@ -236,7 +256,7 @@ class HTIF(pcr_RESET: Int) extends Module with HTIFParameters {
   io.scr.wen := Bool(false)
   io.scr.wdata := pcr_wdata
   io.scr.waddr := scr_addr.toUInt
-  when (state === state_pcr_req && pcr_coreid === SInt(-1)) {
+  when (state === state_pcr_req && pcr_coreid.andR) {
     io.scr.wen := cmd === cmd_writecr
     pcrReadData := scr_rdata(scr_addr)
     state := state_tx
