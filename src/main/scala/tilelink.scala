@@ -40,6 +40,15 @@ trait TileLinkParameters extends UsesParameters {
   val tlNetworkPreservesPointToPointOrdering = params(TLNetworkIsOrderedP2P)
   val tlNetworkDoesNotInterleaveBeats = true
   val amoAluOperandBits = params(XLen)
+
+  def opSizeToXSize(s: UInt) = MuxLookup(s, UInt("b111"), Array(
+    MT_B  -> UInt(0),
+    MT_H  -> UInt(1),
+    MT_W  -> UInt(2),
+    MT_D  -> UInt(3),
+    MT_BU -> UInt(0),
+    MT_HU -> UInt(1),
+    MT_WU -> UInt(2)))
 }
 
 abstract class TLBundle extends Bundle with TileLinkParameters

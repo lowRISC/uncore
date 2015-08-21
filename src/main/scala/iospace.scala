@@ -2,6 +2,7 @@
 
 package uncore
 import Chisel._
+import junctions._
 
 abstract trait IOSpaceParameters extends UsesParameters {
   val xLen = params(XLen)
