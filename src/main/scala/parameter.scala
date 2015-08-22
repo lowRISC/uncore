@@ -6,16 +6,6 @@ import Chisel._
 //Memory Parameters
 case object CacheBlockBytes extends Field[Int]
 case object CacheBlockOffsetBits extends Field[Int]
-case object PAddrBits extends Field[Int]
-case object PgIdxBits extends Field[Int]
-case object PgLevels extends Field[Int]
-case object PgLevelBits extends Field[Int]
-case object VPNBits extends Field[Int]
-case object PPNBits extends Field[Int]
-case object VAddrBits extends Field[Int]
-case object ASIdBits extends Field[Int]
-case object MIFTagBits extends Field[Int]
-case object MIFDataBits extends Field[Int]
 
 // IO space
 case object IOBaseAddr0 extends Field[UInt]
@@ -28,14 +18,9 @@ case object IODataBits extends Field[UInt]
 case object NSets extends Field[Int]
 case object NWays extends Field[Int]
 case object RowBits extends Field[Int]
-case object NTLBEntries extends Field[Int]
 case object CacheName extends Field[String]
 /** Unique name per TileLink network*/
 case object TLId extends Field[String]
-
-// L1 I$
-case object NBTBEntries extends Field[Int]
-case object NRAS extends Field[Int]
 
 // L1 D$
 case object StoreDataQueueDepth extends Field[Int]

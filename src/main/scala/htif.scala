@@ -10,6 +10,7 @@ case object HTIFWidth extends Field[Int]
 case object HTIFNSCR extends Field[Int]
 case object HTIFOffsetBits extends Field[Int]
 case object HTIFNCores extends Field[Int]
+case object RTCPeriod extends Field[Int]
 
 abstract trait HTIFParameters extends UsesParameters {
   val dataBits = params(TLDataBits)

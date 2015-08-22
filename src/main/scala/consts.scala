@@ -8,7 +8,7 @@ import Chisel._
 object MemoryOpConstants extends MemoryOpConstants
 trait MemoryOpConstants {
   val MT_SZ = 4
-  val MT_X  = Bits("b????")
+  val MT_X  = BitPat("b????")
   val MT_B  = Bits("b0000")
   val MT_H  = Bits("b0001")
   val MT_W  = Bits("b0010")

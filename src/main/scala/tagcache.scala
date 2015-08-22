@@ -2,6 +2,7 @@
 
 package uncore
 import Chisel._
+import junctions._
 
 class TagCache extends Module {
   val io = new Bundle {
