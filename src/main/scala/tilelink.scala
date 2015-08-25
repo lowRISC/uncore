@@ -1532,7 +1532,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   val cmd_sent = Reg(init=Bool(false))
 
   // signal to handler allocator
-  io.rdy := is_read || is_write
+  io.rdy := !(is_read || is_write)
   io.tl_match := (tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) ||
                    tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id)) && !io.rdy
   io.na_match := (na_b.id === tag_out || na_r.id === tag_out) && !io.rdy
@@ -1684,11 +1684,11 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
 
   doInternalInputRouting(io.nasti.b, handlerList.map(_.io.nasti.b), naHandlerId)
   val na_b_rdy = Vec(handlerList.map(_.io.nasti.b.ready))
-  io.nasti.b.ready := naMatches.orR && na_b_rdy(tlHandlerId)
+  io.nasti.b.ready := naMatches.orR && na_b_rdy(naHandlerId)
 
   doInternalInputRouting(io.nasti.r, handlerList.map(_.io.nasti.r), naHandlerId)
   val na_r_rdy = Vec(handlerList.map(_.io.nasti.r.ready))
-  io.nasti.r.ready := naMatches.orR && na_r_rdy(tlHandlerId)
+  io.nasti.r.ready := naMatches.orR && na_r_rdy(naHandlerId)
 }
 
 class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters with TileLinkParameters {
