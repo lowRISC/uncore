@@ -1486,166 +1486,209 @@ class SuperChannelOutputDemultiplexer
   }
 }
 
+class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NASTIParameters {
+  val io = new Bundle {
+    val tl = new ManagerTileLinkIO
+    val nasti = new NASTIMasterIO
+    val rdy = Bool(OUTPUT)
+    val tl_match = Bool(OUTPUT)
+    val na_match = Bool(OUTPUT)
+  }
+
+  // liminations:
+  val dataBits = tlDataBits*tlDataBeats 
+  val dstIdBits = params(LNHeaderBits)
+  require(tlDataBits == nastiXDataBits, "Data sizes between LLC and MC don't agree") // TODO: remove this restriction
+  require(tlDataBeats < (1 << nastiXLenBits), "Can't have that many beats")
+  require(dstIdBits + tlClientXactIdBits < nastiXIdBits, "NASTIMasterIO converter is going truncate tags: " + dstIdBits + " + " + tlClientXactIdBits + " >= " + nastiXIdBits)
+  // assume MI or MEI protocol
+
+  // rename signals
+  val tl_acq = io.tl.acquire.bits
+  val tl_rel = io.tl.release.bits
+  val tl_gnt = io.tl.grant.bits
+  val tl_fin = io.tl.finish.bits
+  val na_aw = io.nasti.aw.bits
+  val na_w = io.nasti.w.bits
+  val na_ar = io.nasti.ar.bits
+  val na_b = io.nasti.b.bits
+  val na_r = io.nasti.r.bits
+
+  // internal control registers
+  val write_multiple_data = Reg(init=Bool(false))
+  val read_multiple_data = Reg(init=Bool(false))
+  val (tl_cnt, tl_finish) =
+    Counter((io.tl.acquire.fire() || io.tl.release.fire()) && write_multiple_data, tlDataBeats)
+  val (nr_cnt, nr_finish) =
+    Counter((io.nasti.r.fire() && read_multiple_data), tlDataBeats)
+  val is_read = Reg(init=Bool(false))
+  val is_write = Reg(init=Bool(false))
+  val is_builtin = Reg(init=Bool(false))
+  val tag_out = Reg(UInt(width = nastiXIdBits))
+  val addr_out = Reg(UInt(width = nastiXAddrBits))
+  val len_out = Reg(UInt(width = nastiXLenBits))
+  val size_out = Reg(UInt(width = nastiXSizeBits))
+  val g_type_out = Reg(UInt(width = tlGrantTypeBits))
+  val cmd_sent = Reg(init=Bool(false))
+
+  // signal to handler allocator
+  io.rdy := is_read || is_write
+  io.tl_match := (tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) ||
+                   tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id)) && !io.rdy
+  io.na_match := (na_b.id === tag_out || na_r.id === tag_out) && !io.rdy
+
+  // assigning control registers
+  when(io.nasti.b.fire()) {
+    write_multiple_data := Bool(false)
+    is_write := Bool(false)
+    cmd_sent := Bool(false)
+  }
+
+  when(na_r.last && io.nasti.r.fire()) {
+    read_multiple_data := Bool(false)
+    is_read := Bool(false)
+    cmd_sent := Bool(false)
+  }
+
+  when(io.tl.acquire.valid) {
+    write_multiple_data := tl_acq.hasMultibeatData()
+    read_multiple_data := !tl_acq.isBuiltInType() || tl_acq.isBuiltInType(Acquire.getBlockType)
+    is_read := tl_acq.isBuiltInType() || !tl_acq.hasData()
+    is_write := tl_acq.isBuiltInType() && tl_acq.hasData()
+    is_builtin := tl_acq.isBuiltInType()
+    tag_out := Cat(tl_acq.client_id, tl_acq.client_xact_id)
+    addr_out := Mux(tl_acq.isBuiltInType(), tl_acq.full_addr(), tl_acq.addr_block << (tlBeatAddrBits + tlByteAddrBits))
+    len_out := Mux(!tl_acq.isBuiltInType() || !tl_acq.isSubBlockType(), UInt(tlDataBeats-1), UInt(0))
+    size_out := Mux(!tl_acq.isBuiltInType() || !tl_acq.isSubBlockType() || tl_acq.hasData(),
+                    bytesToXSize(UInt(tlDataBytes)),
+                    opSizeToXSize(tl_acq.op_size()))
+    g_type_out := Mux(tl_acq.isBuiltInType(), tl_acq.getBuiltInGrantType(), UInt(0)) // assume MI or MEI
+  }
+
+  when(io.tl.release.valid) {
+    write_multiple_data := Bool(true)
+    read_multiple_data := Bool(false)
+    is_read := Bool(false)
+    is_write := Bool(true)
+    is_builtin := Bool(true)
+    tag_out := Cat(tl_rel.client_id, tl_rel.client_xact_id)
+    addr_out := tl_rel.addr_block << (tlBeatAddrBits + tlByteAddrBits)
+    len_out := UInt(tlDataBeats-1)
+    size_out := bytesToXSize(UInt(tlDataBytes))
+    g_type_out := Grant.voluntaryAckType
+  }
+
+  when(io.nasti.ar.fire() || io.nasti.aw.fire()) {
+    cmd_sent := Bool(true)
+  }
+
+  // nasti.aw
+  io.nasti.aw.valid := is_write && !cmd_sent
+  na_aw.id := tag_out
+  na_aw.addr := addr_out
+  na_aw.len := len_out
+  na_aw.size := size_out
+  na_aw.burst := UInt("b01")
+  na_aw.lock := Bool(false)
+  na_aw.cache := UInt("b0000")
+  na_aw.prot := UInt("b000")
+  na_aw.qos := UInt("b0000")
+  na_aw.region := UInt("b0000")
+  na_aw.user := UInt(0)
+
+  // nasti.w
+  io.nasti.w.valid := io.tl.acquire.valid && (is_write || tl_acq.isBuiltInType() && tl_acq.hasData()) || io.tl.release.valid
+  na_w.strb := Mux(tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1))
+  na_w.data := Mux(io.tl.release.valid, tl_rel.data, tl_acq.data)
+  na_w.last := Mux(io.tl.release.valid || tl_acq.hasMultibeatData(), tl_finish, io.tl.acquire.valid)
+
+  // nasti.ar
+  io.nasti.ar.valid := is_read && !cmd_sent
+  io.nasti.ar.bits := io.nasti.aw.bits
+
+  // nasti.b
+  io.nasti.b.ready := io.tl.grant.fire()
+
+  // nasti.r
+  io.nasti.r.ready := io.tl.grant.fire()
+
+  // tilelink acquire
+  io.tl.acquire.ready := io.nasti.w.fire() || io.nasti.ar.fire()
+
+  // tilelink grant
+  io.tl.grant.valid := Mux(is_write, io.nasti.b.valid, io.nasti.r.valid)
+  tl_gnt := Mux(is_write,
+    Grant(
+      dst = tag_out >> tlClientXactIdBits,
+      is_builtin_type = Bool(true),
+      g_type = g_type_out,
+      client_xact_id = tag_out(tlClientXactIdBits-1,0),
+      manager_xact_id = UInt(id)),
+    Grant(
+      dst = tag_out >> tlClientXactIdBits,
+      is_builtin_type = is_builtin,
+      g_type = g_type_out,
+      client_xact_id = tag_out(tlClientXactIdBits-1,0),
+      manager_xact_id = UInt(id),
+      addr_beat = nr_cnt,
+      data = io.nasti.r.bits.data))
+}
+
 class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   val io = new Bundle {
     val tl = new ManagerTileLinkIO
     val nasti = new NASTIMasterIO
   }
 
-  val dataBits = tlDataBits*tlDataBeats 
-  val dstIdBits = params(LNHeaderBits)
-  require(tlDataBits == nastiXDataBits, "Data sizes between LLC and MC don't agree") // TODO: remove this restriction
-  require(tlDataBeats < (1 << nastiXLenBits), "Can't have that many beats")
-  require(dstIdBits + tlClientXactIdBits < nastiXIdBits, "NASTIMasterIO converter is going truncate tags: " + dstIdBits + " + " + tlClientXactIdBits + " >= " + nastiXIdBits)
-
-  io.tl.acquire.ready := Bool(false)
   io.tl.probe.valid := Bool(false)
   io.tl.release.ready := Bool(false)
   io.tl.finish.ready := Bool(true)
 
-  io.nasti.b.ready := Bool(false)
-  io.nasti.r.ready := Bool(false)
-  io.nasti.ar.valid := Bool(false)
-  io.nasti.aw.valid := Bool(false)
-  io.nasti.w.valid := Bool(false)
+  val handlerList = (0 until nastiHandlers).map(id => Module(new NASTIMasterIOTileLinkIOConverterHandler(id)))
+  val tlMatches = Vec(handlerList.map(_.io.tl_match)).toBits
+  val tlReady = Vec(handlerList.map(_.io.rdy)).toBits
+  val tlHandlerId = Mux(tlMatches.orR,
+                        PriorityEncoder(tlMatches),
+                        PriorityEncoder(tlReady))
+  val naMatches = Vec(handlerList.map(_.io.na_match)).toBits
+  val naHandlerId = PriorityEncoder(naMatches)
 
-  val dst_off = dstIdBits + tlClientXactIdBits
-  val acq_has_data = io.tl.acquire.bits.hasData()
-  val rel_has_data = io.tl.release.bits.hasData()
-  val is_write = io.tl.release.valid || (io.tl.acquire.valid && acq_has_data)
-
-  // Decompose outgoing TL Acquires into NASTI address and data channels
-  val active_out = Reg(init=Bool(false))
-  val cmd_sent_out = Reg(init=Bool(false))
-  val tag_out = Reg(UInt(width = nastiXIdBits))
-  val addr_out = Reg(UInt(width = nastiXAddrBits))
-  val has_data = Reg(init=Bool(false))
-  val len_out = Reg(UInt(width = nastiXLenBits))
-  val size_out = Reg(UInt(width = nastiXSizeBits))
-  val data_from_rel = Reg(init=Bool(false))
-  val (tl_cnt_out, tl_wrap_out) =
-    Counter((io.tl.acquire.fire() && acq_has_data) ||
-              (io.tl.release.fire() && rel_has_data), tlDataBeats)
-  val tl_done_out = Reg(init=Bool(false))
-
-  io.nasti.ar.bits.id := tag_out
-  io.nasti.ar.bits.addr := addr_out
-  io.nasti.ar.bits.len := len_out
-  io.nasti.ar.bits.size := size_out
-  io.nasti.ar.bits.burst := UInt("b01")
-  io.nasti.ar.bits.lock := Bool(false)
-  io.nasti.ar.bits.cache := UInt("b0000")
-  io.nasti.ar.bits.prot := UInt("b000")
-  io.nasti.ar.bits.qos := UInt("b0000")
-  io.nasti.ar.bits.region := UInt("b0000")
-  io.nasti.ar.bits.user := UInt(0)
-  io.nasti.aw.bits := io.nasti.ar.bits
-  io.nasti.w.bits.strb := Mux(data_from_rel, SInt(-1), io.tl.acquire.bits.wmask())
-  io.nasti.w.bits.data := Mux(data_from_rel, io.tl.release.bits.data, io.tl.acquire.bits.data)
-  io.nasti.w.bits.last := tl_wrap_out
-
-  when(!active_out){
-    io.tl.release.ready := io.nasti.w.ready
-    io.tl.acquire.ready := io.nasti.w.ready && !io.tl.release.valid
-    io.nasti.w.valid := (io.tl.release.valid && rel_has_data) ||
-                        (io.tl.acquire.valid && acq_has_data)
-    when(io.nasti.w.ready && (io.tl.release.valid || io.tl.acquire.valid)) {
-      active_out := (!is_write && !io.nasti.ar.ready) ||
-                    (is_write && !(io.nasti.aw.ready && io.nasti.w.ready)) ||
-                    (io.nasti.w.valid && Bool(tlDataBeats > 1))
-      io.nasti.aw.valid := is_write
-      io.nasti.ar.valid := !is_write
-      cmd_sent_out := (!is_write && io.nasti.ar.ready) || (is_write && io.nasti.aw.ready)
-      tl_done_out := tl_wrap_out
-      when(io.tl.release.valid) {
-        data_from_rel := Bool(true)
-        io.nasti.w.bits.data := io.tl.release.bits.data
-        io.nasti.w.bits.strb := SInt(-1)
-        val tag =  Cat(io.tl.release.bits.client_id,
-                       io.tl.release.bits.client_xact_id,
-                       io.tl.release.bits.isVoluntary())
-        val addr = io.tl.release.bits.full_addr()
-        io.nasti.aw.bits.id := tag
-        tag_out := tag
-        io.nasti.aw.bits.addr := addr
-        addr_out := addr
-        io.nasti.aw.bits.len := UInt(tlDataBeats-1)
-        len_out := UInt(tlDataBeats-1)
-        io.nasti.aw.bits.size := bytesToXSize(UInt(tlDataBytes))
-        size_out := io.nasti.aw.bits.size
-        has_data := rel_has_data
-      } .elsewhen(io.tl.acquire.valid) {
-        data_from_rel := Bool(false)
-        io.nasti.w.bits.data := io.tl.acquire.bits.data
-        io.nasti.w.bits.strb := io.tl.acquire.bits.wmask()
-        val tag = Cat(io.tl.acquire.bits.client_id,
-                      io.tl.acquire.bits.client_xact_id,
-                      io.tl.acquire.bits.isBuiltInType())
-        val addr = io.tl.acquire.bits.full_addr()
-        when(is_write) {
-          io.nasti.aw.bits.id := tag
-          io.nasti.aw.bits.addr := addr
-          io.nasti.aw.bits.len := Mux(io.tl.acquire.bits.isBuiltInType(Acquire.putBlockType),
-                                    UInt(tlDataBeats-1), UInt(0)) 
-          len_out := io.nasti.aw.bits.len
-          io.nasti.aw.bits.size := bytesToXSize(PopCount(io.tl.acquire.bits.wmask()))
-          size_out := io.nasti.aw.bits.size
-        } .otherwise {
-          io.nasti.ar.bits.id := tag
-          io.nasti.ar.bits.addr := addr
-          io.nasti.ar.bits.len := Mux(io.tl.acquire.bits.isBuiltInType(Acquire.getBlockType) || !io.tl.acquire.bits.isBuiltInType(),
-                                    UInt(tlDataBeats-1), UInt(0)) 
-          len_out := io.nasti.ar.bits.len
-          io.nasti.ar.bits.size := Mux(io.tl.acquire.bits.isBuiltInType(), opSizeToXSize(io.tl.acquire.bits.op_size()), bytesToXSize(UInt(tlDataBytes)))
-          size_out := io.nasti.ar.bits.size
-        }
-        tag_out := tag
-        addr_out := addr
-        has_data := acq_has_data
-      }
-    }
-  }
-  when(active_out) {
-    io.nasti.ar.valid := !cmd_sent_out && !has_data
-    io.nasti.aw.valid := !cmd_sent_out && has_data
-    cmd_sent_out := cmd_sent_out || io.nasti.ar.fire() || io.nasti.aw.fire()
-    when(has_data && !tl_done_out) {
-      when(data_from_rel) {
-        io.tl.release.ready := io.nasti.w.ready
-        io.nasti.w.valid := io.tl.release.valid
-      } .otherwise {
-        io.tl.acquire.ready := io.nasti.w.ready
-        io.nasti.w.valid := io.tl.acquire.valid
-      }
-    }
-    when(tl_wrap_out) { tl_done_out := Bool(true) }
-    when(cmd_sent_out && (!has_data || tl_done_out)) { active_out := Bool(false) }
+  def doInternalOutputArbitration[T <: Data](
+      out: DecoupledIO[T],
+      ins: Seq[DecoupledIO[T]]) {
+    val arb = Module(new RRArbiter(out.bits, ins.size))
+    out <> arb.io.out
+    arb.io.in <> ins
   }
 
-  // Aggregate incoming NASTI responses into TL Grants
-  val (tl_cnt_in, tl_wrap_in) = Counter(io.tl.grant.fire() && io.tl.grant.bits.hasMultibeatData(), tlDataBeats)
-  val gnt_arb = Module(new Arbiter(new GrantToDst, 2))
-  io.tl.grant <> gnt_arb.io.out
+  def doInternalInputRouting[T <: Data](in: DecoupledIO[T], outs: Seq[DecoupledIO[T]], id: UInt) {
+    outs.map(_.bits := in.bits)
+    outs.zipWithIndex.map { case (o,i) => o.valid := in.valid && id === UInt(i) }
+  }
 
-  gnt_arb.io.in(0).valid := io.nasti.r.valid
-  io.nasti.r.ready := gnt_arb.io.in(0).ready
-  gnt_arb.io.in(0).bits := Grant(
-    dst = (if(dstIdBits > 0) io.nasti.r.bits.id(dst_off, tlClientXactIdBits + 1) else UInt(0)),
-    is_builtin_type = io.nasti.r.bits.id(0),
-    g_type = Mux(io.nasti.r.bits.id(0), Grant.getDataBlockType, UInt(0)), // TODO: Assumes MI or MEI protocol
-    client_xact_id = io.nasti.r.bits.id >> UInt(1),
-    manager_xact_id = UInt(0),
-    addr_beat = tl_cnt_in,
-    data = io.nasti.r.bits.data)
+  doInternalInputRouting(io.tl.acquire, handlerList.map(_.io.tl.acquire), tlHandlerId)
+  val acq_rdy = Vec(handlerList.map(_.io.tl.acquire.ready))
+  io.tl.acquire.ready := (tlMatches.orR || tlReady.orR) && acq_rdy(tlHandlerId)
 
-  gnt_arb.io.in(1).valid := io.nasti.b.valid
-  io.nasti.b.ready := gnt_arb.io.in(1).ready
-  gnt_arb.io.in(1).bits := Grant(
-    dst = (if(dstIdBits > 0) io.nasti.b.bits.id(dst_off, tlClientXactIdBits + 1) else UInt(0)),
-    is_builtin_type = Bool(true),
-    g_type = Mux(io.nasti.b.bits.id(0), Grant.voluntaryAckType, Grant.putAckType),
-    client_xact_id = io.nasti.b.bits.id >> UInt(1),
-    manager_xact_id = UInt(0))
+  doInternalInputRouting(io.tl.release, handlerList.map(_.io.tl.release), tlHandlerId)
+  val rel_rdy = Vec(handlerList.map(_.io.tl.release.ready))
+  io.tl.release.ready := (tlMatches.orR || tlReady.orR) && rel_rdy(tlHandlerId)
+
+  doInternalOutputArbitration(io.tl.grant, handlerList.map(_.io.tl.grant))
+
+  doInternalOutputArbitration(io.nasti.ar, handlerList.map(_.io.nasti.ar))
+
+  doInternalOutputArbitration(io.nasti.w, handlerList.map(_.io.nasti.w))
+
+  doInternalOutputArbitration(io.nasti.aw, handlerList.map(_.io.nasti.aw))
+
+  doInternalInputRouting(io.nasti.b, handlerList.map(_.io.nasti.b), naHandlerId)
+  val na_b_rdy = Vec(handlerList.map(_.io.nasti.b.ready))
+  io.nasti.b.ready := naMatches.orR && na_b_rdy(tlHandlerId)
+
+  doInternalInputRouting(io.nasti.r, handlerList.map(_.io.nasti.r), naHandlerId)
+  val na_r_rdy = Vec(handlerList.map(_.io.nasti.r.ready))
+  io.nasti.r.ready := naMatches.orR && na_r_rdy(tlHandlerId)
 }
 
 class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters with TileLinkParameters {
