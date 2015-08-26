@@ -3,6 +3,7 @@
 package uncore
 import Chisel._
 import junctions._
+import ChiselComponents._
 import scala.math.max
 
 
@@ -983,7 +984,7 @@ trait TileLinkArbiterLike extends TileLinkParameters {
       clts: Seq[DecoupledIO[LogicalNetworkIO[M]]],
       mngr: DecoupledIO[LogicalNetworkIO[M]]) {
     def hasData(m: LogicalNetworkIO[M]) = m.payload.hasMultibeatData()
-    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
+    val arb = Module(new StableLockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
     clts.zipWithIndex.zip(arb.io.in).map{ case ((req, id), arb) => {
       arb.valid := req.valid
       arb.bits := req.bits
@@ -997,7 +998,7 @@ trait TileLinkArbiterLike extends TileLinkParameters {
       clts: Seq[DecoupledIO[M]],
       mngr: DecoupledIO[M]) {
     def hasData(m: M) = m.hasMultibeatData()
-    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
+    val arb = Module(new StableLockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
     clts.zipWithIndex.zip(arb.io.in).map{ case ((req, id), arb) => {
       arb.valid := req.valid
       arb.bits := req.bits
@@ -1058,7 +1059,7 @@ trait TileLinkArbiterLike extends TileLinkParameters {
   }
 
   def hookupFinish[M <: LogicalNetworkIO[Finish]]( clts: Seq[DecoupledIO[M]], mngr: DecoupledIO[M]) {
-    val arb = Module(new RRArbiter(mngr.bits, arbN))
+    val arb = Module(new StableRRArbiter(mngr.bits, arbN))
     arb.io.in <> clts
     mngr <> arb.io.out
   }
@@ -1373,7 +1374,7 @@ class SuperChannelInputMultiplexer
 
 
   def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
-  val arb = Module(new LockingArbiter(io.su.bits.clone, 3, tlDataBeats, Some(hasData _)))
+  val arb = Module(new StableLockingArbiter(io.su.bits.clone, 3, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0).valid := io.tl.finish.valid
   arb.io.in(0).bits.header := io.tl.finish.bits.header
@@ -1403,7 +1404,7 @@ class SuperChannelOutputMultiplexer
   }
 
   def hasData(m: LogicalNetworkIO[SuperChannel]) = m.payload.hasMultibeatData()
-  val arb = Module(new LockingArbiter(io.su.bits.clone, 2, tlDataBeats, Some(hasData _)))
+  val arb = Module(new StableLockingArbiter(io.su.bits.clone, 2, tlDataBeats, Some(hasData _)))
 
   arb.io.in(0).valid := io.tl.grant.valid
   arb.io.in(0).bits.header := io.tl.grant.bits.header
@@ -1656,7 +1657,7 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   def doInternalOutputArbitration[T <: Data](
       out: DecoupledIO[T],
       ins: Seq[DecoupledIO[T]]) {
-    val arb = Module(new RRArbiter(out.bits, ins.size))
+    val arb = Module(new StableRRArbiter(out.bits, ins.size))
     out <> arb.io.out
     arb.io.in <> ins
   }
