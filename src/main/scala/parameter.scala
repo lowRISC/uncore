@@ -74,3 +74,5 @@ case object TLMaxClientXacts extends Field[Int]
 /** Maximum number of clients multiplexed onto a single port */
 case object TLMaxClientsPerPort extends Field[Int]
 
+//Tile Constants
+case object NTiles extends Field[Int]

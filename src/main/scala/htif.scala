@@ -5,6 +5,7 @@ package uncore
 import Chisel._
 import Chisel.ImplicitConversions._
 import uncore._
+import scala.math.max
 
 abstract trait HTIFParameters extends UsesParameters {
   val nCores = params(NTiles)
