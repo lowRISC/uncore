@@ -1608,7 +1608,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   io.nasti.ar.bits := io.nasti.aw.bits
 
   // nasti.b
-  io.nasti.b.ready := io.tl.grant.fire()
+  io.nasti.b.ready := is_write && io.tl.grant.fire()
 
   // nasti.r
   io.nasti.r.ready := io.tl.grant.fire()
