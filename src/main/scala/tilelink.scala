@@ -1518,8 +1518,8 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   // internal control registers
   val write_multiple_data = Reg(init=Bool(false))
   val read_multiple_data = Reg(init=Bool(false))
-  val (tl_cnt, tl_finish) =
-    Counter((io.tl.acquire.fire() || io.tl.release.fire()) && write_multiple_data, tlDataBeats)
+  val (nw_cnt, nw_finish) =
+    Counter(io.nasti.w.fire() && write_multiple_data, tlDataBeats)
   val (nr_cnt, nr_finish) =
     Counter((io.nasti.r.fire() && read_multiple_data), tlDataBeats)
   val is_read = Reg(init=Bool(false))
@@ -1598,10 +1598,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   na_aw.user := UInt(0)
 
   // nasti.w
-  io.nasti.w.valid := io.tl.acquire.valid && (is_write || tl_acq.isBuiltInType() && tl_acq.hasData()) || io.tl.release.valid
+  io.nasti.w.valid := (io.tl.acquire.valid || io.tl.release.valid) && is_write
   na_w.strb := Mux(tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1))
   na_w.data := Mux(io.tl.release.valid, tl_rel.data, tl_acq.data)
-  na_w.last := Mux(io.tl.release.valid || tl_acq.hasMultibeatData(), tl_finish, io.tl.acquire.valid)
+  na_w.last := Mux(io.tl.release.valid || tl_acq.hasMultibeatData(), nw_finish, io.tl.acquire.valid)
 
   // nasti.ar
   io.nasti.ar.valid := is_read && !cmd_sent
@@ -1615,6 +1615,9 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
 
   // tilelink acquire
   io.tl.acquire.ready := io.nasti.w.fire() || io.nasti.ar.fire()
+
+  // tilelink release
+  io.tl.release.ready := io.nasti.w.fire()
 
   // tilelink grant
   io.tl.grant.valid := Mux(is_write, io.nasti.b.valid, io.nasti.r.valid)
