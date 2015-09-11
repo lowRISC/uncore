@@ -1658,9 +1658,12 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   val naHandlerId = PriorityEncoder(naMatches)
 
   def doInternalOutputArbitration[T <: Data](
-      out: DecoupledIO[T],
-      ins: Seq[DecoupledIO[T]]) {
-    val arb = Module(new StableRRArbiter(out.bits, ins.size))
+    out: DecoupledIO[T],
+    ins: Seq[DecoupledIO[T]],
+    count: Int = 1,
+    needsLock: Option[T => Bool] = None)
+  {
+    val arb = Module(new StableLockingRRArbiter(out.bits, ins.size, count, needsLock))
     out <> arb.io.out
     arb.io.in <> ins
   }
@@ -1682,7 +1685,9 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
 
   doInternalOutputArbitration(io.nasti.ar, handlerList.map(_.io.nasti.ar))
 
-  doInternalOutputArbitration(io.nasti.w, handlerList.map(_.io.nasti.w))
+  // NASTI.w does not allow interleaving
+  def w_multibeat(w: NASTIWriteDataChannel): Bool = !w.last
+  doInternalOutputArbitration(io.nasti.w, handlerList.map(_.io.nasti.w), tlDataBeats, w_multibeat _)
 
   doInternalOutputArbitration(io.nasti.aw, handlerList.map(_.io.nasti.aw))
 
