@@ -1515,7 +1515,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   val na_b = io.nasti.b.bits
   val na_r = io.nasti.r.bits
 
-  // internal control registers
+  // internal control signals
   val write_multiple_data = Reg(init=Bool(false))
   val read_multiple_data = Reg(init=Bool(false))
   val (nw_cnt, nw_finish) =
@@ -1524,6 +1524,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     Counter((io.nasti.r.fire() && read_multiple_data), tlDataBeats)
   val is_read = Reg(init=Bool(false))
   val is_write = Reg(init=Bool(false))
+  val is_acq = Reg(init=Bool(false))
   val is_builtin = Reg(init=Bool(false))
   val tag_out = Reg(UInt(width = nastiXIdBits))
   val addr_out = Reg(UInt(width = nastiXAddrBits))
@@ -1531,9 +1532,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   val size_out = Reg(UInt(width = nastiXSizeBits))
   val g_type_out = Reg(UInt(width = tlGrantTypeBits))
   val cmd_sent = Reg(init=Bool(false))
-
+  val is_idle = !(is_read || is_write)
+  
   // signal to handler allocator
-  io.rdy := !(is_read || is_write)
+  io.rdy := is_idle
   io.tl_match := (tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) ||
                    tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id)) && !io.rdy
   io.na_match := (na_b.id === tag_out || na_r.id === tag_out) && !io.rdy
@@ -1543,19 +1545,22 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     write_multiple_data := Bool(false)
     is_write := Bool(false)
     cmd_sent := Bool(false)
+    is_acq := Bool(false)
   }
 
   when(na_r.last && io.nasti.r.fire()) {
     read_multiple_data := Bool(false)
     is_read := Bool(false)
     cmd_sent := Bool(false)
+    is_acq := Bool(false)
   }
 
-  when(io.tl.acquire.valid) {
+  when(is_idle && io.tl.acquire.valid) {
     write_multiple_data := tl_acq.hasMultibeatData()
     read_multiple_data := !tl_acq.isBuiltInType() || tl_acq.isBuiltInType(Acquire.getBlockType)
     is_read := tl_acq.isBuiltInType() || !tl_acq.hasData()
     is_write := tl_acq.isBuiltInType() && tl_acq.hasData()
+    is_acq := Bool(true)
     is_builtin := tl_acq.isBuiltInType()
     tag_out := Cat(tl_acq.client_id, tl_acq.client_xact_id)
     addr_out := Mux(tl_acq.isBuiltInType(), tl_acq.full_addr(), tl_acq.addr_block << (tlBeatAddrBits + tlByteAddrBits))
@@ -1566,7 +1571,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     g_type_out := Mux(tl_acq.isBuiltInType(), tl_acq.getBuiltInGrantType(), UInt(0)) // assume MI or MEI
   }
 
-  when(io.tl.release.valid) {
+  when(is_idle && io.tl.release.valid) {
     write_multiple_data := Bool(true)
     read_multiple_data := Bool(false)
     is_read := Bool(false)
@@ -1598,10 +1603,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   na_aw.user := UInt(0)
 
   // nasti.w
-  io.nasti.w.valid := (io.tl.acquire.valid || io.tl.release.valid) && is_write
-  na_w.strb := Mux(tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1))
-  na_w.data := Mux(io.tl.release.valid, tl_rel.data, tl_acq.data)
-  na_w.last := Mux(io.tl.release.valid || tl_acq.hasMultibeatData(), nw_finish, io.tl.acquire.valid)
+  io.nasti.w.valid := ((io.tl.acquire.valid && is_acq) || (io.tl.release.valid && !is_acq)) && is_write
+  na_w.strb := Mux(is_acq && tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1))
+  na_w.data := Mux(is_acq, tl_acq.data, tl_rel.data)
+  na_w.last := nw_finish || is_acq && !tl_acq.hasMultibeatData()
 
   // nasti.ar
   io.nasti.ar.valid := is_read && !cmd_sent
@@ -1611,13 +1616,13 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   io.nasti.b.ready := is_write && io.tl.grant.fire()
 
   // nasti.r
-  io.nasti.r.ready := io.tl.grant.fire()
+  io.nasti.r.ready := is_read && io.tl.grant.fire()
 
   // tilelink acquire
-  io.tl.acquire.ready := io.nasti.w.fire() || io.nasti.ar.fire()
+  io.tl.acquire.ready := is_acq && (io.nasti.w.fire() || io.nasti.ar.fire())
 
   // tilelink release
-  io.tl.release.ready := io.nasti.w.fire()
+  io.tl.release.ready := !is_acq && io.nasti.w.fire()
 
   // tilelink grant
   io.tl.grant.valid := Mux(is_write, io.nasti.b.valid, io.nasti.r.valid)
