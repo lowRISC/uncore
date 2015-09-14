@@ -635,7 +635,7 @@ object Grant {
       manager_xact_id: UInt,
       addr_beat: UInt,
       data: UInt): Grant = {
-    val gnt = new Grant
+    val gnt = Wire(new Grant)
     gnt.is_builtin_type := is_builtin_type
     gnt.g_type := g_type
     gnt.client_xact_id := client_xact_id
@@ -1276,7 +1276,7 @@ class SuperChannel extends TileLinkChannel
   def toGrant(dummy: Int = 0) =
     Grant(flag, mtype, client_xact_id, manager_xact_id, addr_beat, data)
   def toFinish(dummy: Int = 0): Finish = {
-    val fin = new Finish
+    val fin = Wire(new Finish)
     fin.manager_xact_id := manager_xact_id
     fin
   }
@@ -1299,7 +1299,7 @@ object SuperChannel {
 
   // Acquire => SuperChannel
   def apply(acq: Acquire): SuperChannel = {
-    val msg = new SuperChannel
+    val msg = Wire(new SuperChannel)
     msg.ctype := acquireType
     msg.flag := acq.is_builtin_type
     msg.mtype := acq.a_type
@@ -1314,7 +1314,7 @@ object SuperChannel {
 
   // Probe => SuperChannel
   def apply(prb: Probe): SuperChannel = {
-    val msg = new SuperChannel
+    val msg = Wire(new SuperChannel)
     msg.ctype := probeType
     msg.mtype := prb.p_type
     msg.addr_block := prb.addr_block
@@ -1324,7 +1324,7 @@ object SuperChannel {
 
   // Release => SuperChannel
   def apply(rel: Release): SuperChannel = {
-    val msg = new SuperChannel
+    val msg = Wire(new SuperChannel)
     msg.ctype := releaseType
     msg.mtype := rel.r_type
     msg.client_xact_id := rel.client_xact_id
@@ -1338,7 +1338,7 @@ object SuperChannel {
 
   // Grant => SuperChannel
   def apply(gnt: Grant): SuperChannel = {
-    val msg = new SuperChannel
+    val msg = Wire(new SuperChannel)
     msg.ctype := grantType
     msg.flag := gnt.is_builtin_type
     msg.mtype := gnt.g_type
@@ -1352,7 +1352,7 @@ object SuperChannel {
 
   // Finish => SuperChannel
   def apply(fin: Finish): SuperChannel = {
-    val msg = new SuperChannel
+    val msg = Wire(new SuperChannel)
     msg.ctype := finishType
     msg.manager_xact_id := fin.manager_xact_id
     msg.hasMultibeatData := fin.hasMultibeatData()
@@ -1492,8 +1492,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     val tl = new ManagerTileLinkIO
     val nasti = new NASTIMasterIO
     val rdy = Bool(OUTPUT)
-    val tl_match = Bool(OUTPUT)
-    val na_match = Bool(OUTPUT)
+    val tl_acq_match = Bool(OUTPUT)
+    val tl_rel_match = Bool(OUTPUT)
+    val na_b_match = Bool(OUTPUT)
+    val na_r_match = Bool(OUTPUT)
   }
 
   // liminations:
@@ -1533,12 +1535,13 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   val g_type_out = Reg(UInt(width = tlGrantTypeBits))
   val cmd_sent = Reg(init=Bool(false))
   val is_idle = !(is_read || is_write)
-  
+
   // signal to handler allocator
   io.rdy := is_idle
-  io.tl_match := (tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) ||
-                   tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id)) && !io.rdy
-  io.na_match := (na_b.id === tag_out || na_r.id === tag_out) && !io.rdy
+  io.tl_acq_match := tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) && !io.rdy
+  io.tl_rel_match := tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id) && !io.rdy
+  io.na_b_match := na_b.id === tag_out && !io.rdy
+  io.na_r_match := na_r.id === tag_out && !io.rdy
 
   // assigning control registers
   when(io.nasti.b.fire()) {
@@ -1555,7 +1558,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     is_acq := Bool(false)
   }
 
-  when(is_idle && io.tl.acquire.valid) {
+  when(is_idle && io.tl.acquire.valid && !io.tl.release.valid) { // release take priority
     write_multiple_data := tl_acq.hasMultibeatData()
     read_multiple_data := !tl_acq.isBuiltInType() || tl_acq.isBuiltInType(Acquire.getBlockType)
     is_read := tl_acq.isBuiltInType() || !tl_acq.hasData()
@@ -1604,7 +1607,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
 
   // nasti.w
   io.nasti.w.valid := ((io.tl.acquire.valid && is_acq) || (io.tl.release.valid && !is_acq)) && is_write
-  na_w.strb := Mux(is_acq && tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1))
+  na_w.strb := Mux(is_acq && tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1, nastiWStrobeBits).toUInt)
   na_w.data := Mux(is_acq, tl_acq.data, tl_rel.data)
   na_w.last := nw_finish || is_acq && !tl_acq.hasMultibeatData()
 
@@ -1654,13 +1657,19 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   io.tl.finish.ready := Bool(true)
 
   val handlerList = (0 until nastiHandlers).map(id => Module(new NASTIMasterIOTileLinkIOConverterHandler(id)))
-  val tlMatches = Vec(handlerList.map(_.io.tl_match)).toBits
+  val tlAcqMatches = Vec(handlerList.map(_.io.tl_acq_match)).toBits
+  val tlRelMatches = Vec(handlerList.map(_.io.tl_rel_match)).toBits
   val tlReady = Vec(handlerList.map(_.io.rdy)).toBits
-  val tlHandlerId = Mux(tlMatches.orR,
-                        PriorityEncoder(tlMatches),
+  val tlAcqHandlerId = Mux(tlAcqMatches.orR,
+                        PriorityEncoder(tlAcqMatches),
                         PriorityEncoder(tlReady))
-  val naMatches = Vec(handlerList.map(_.io.na_match)).toBits
-  val naHandlerId = PriorityEncoder(naMatches)
+  val tlRelHandlerId = Mux(tlRelMatches.orR,
+                        PriorityEncoder(tlRelMatches),
+                        PriorityEncoder(tlReady))
+  val naBMatches = Vec(handlerList.map(_.io.na_b_match)).toBits
+  val naRMatches = Vec(handlerList.map(_.io.na_r_match)).toBits
+  val naBHandlerId = PriorityEncoder(naBMatches)
+  val naRHandlerId = PriorityEncoder(naRMatches)
 
   def doInternalOutputArbitration[T <: Data](
     out: DecoupledIO[T],
@@ -1678,13 +1687,13 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
     outs.zipWithIndex.map { case (o,i) => o.valid := in.valid && id === UInt(i) }
   }
 
-  doInternalInputRouting(io.tl.acquire, handlerList.map(_.io.tl.acquire), tlHandlerId)
+  doInternalInputRouting(io.tl.acquire, handlerList.map(_.io.tl.acquire), tlAcqHandlerId)
   val acq_rdy = Vec(handlerList.map(_.io.tl.acquire.ready))
-  io.tl.acquire.ready := (tlMatches.orR || tlReady.orR) && acq_rdy(tlHandlerId)
+  io.tl.acquire.ready := (tlAcqMatches.orR || tlReady.orR) && acq_rdy(tlAcqHandlerId)
 
-  doInternalInputRouting(io.tl.release, handlerList.map(_.io.tl.release), tlHandlerId)
+  doInternalInputRouting(io.tl.release, handlerList.map(_.io.tl.release), tlRelHandlerId)
   val rel_rdy = Vec(handlerList.map(_.io.tl.release.ready))
-  io.tl.release.ready := (tlMatches.orR || tlReady.orR) && rel_rdy(tlHandlerId)
+  io.tl.release.ready := (tlRelMatches.orR || tlReady.orR) && rel_rdy(tlRelHandlerId)
 
   doInternalOutputArbitration(io.tl.grant, handlerList.map(_.io.tl.grant))
 
@@ -1696,13 +1705,13 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
 
   doInternalOutputArbitration(io.nasti.aw, handlerList.map(_.io.nasti.aw))
 
-  doInternalInputRouting(io.nasti.b, handlerList.map(_.io.nasti.b), naHandlerId)
+  doInternalInputRouting(io.nasti.b, handlerList.map(_.io.nasti.b), naBHandlerId)
   val na_b_rdy = Vec(handlerList.map(_.io.nasti.b.ready))
-  io.nasti.b.ready := naMatches.orR && na_b_rdy(naHandlerId)
+  io.nasti.b.ready := naBMatches.orR && na_b_rdy(naBHandlerId)
 
-  doInternalInputRouting(io.nasti.r, handlerList.map(_.io.nasti.r), naHandlerId)
+  doInternalInputRouting(io.nasti.r, handlerList.map(_.io.nasti.r), naRHandlerId)
   val na_r_rdy = Vec(handlerList.map(_.io.nasti.r.ready))
-  io.nasti.r.ready := naMatches.orR && na_r_rdy(naHandlerId)
+  io.nasti.r.ready := naRMatches.orR && na_r_rdy(naRHandlerId)
 }
 
 class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters with TileLinkParameters {

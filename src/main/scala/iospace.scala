@@ -12,15 +12,15 @@ abstract trait IOSpaceParameters extends UsesParameters {
 
 class IOSpaceConsts extends Module with IOSpaceParameters {
   val io = new Bundle {
-    val base = Vec.fill(2){UInt(OUTPUT, xLen)} // base for CSR
-    val mask = Vec.fill(2){UInt(OUTPUT, xLen)} // mask for CSR
-    val paddr = UInt(INPUT, pALen)             // physical address for IO check
-    val isIO = Bool(OUTPUT)                    // indicate an IO address 
+    val base = Vec(UInt(OUTPUT, xLen), 2) // base for CSR
+    val mask = Vec(UInt(OUTPUT, xLen), 2) // mask for CSR
+    val paddr = UInt(INPUT, pALen)        // physical address for IO check
+    val isIO = Bool(OUTPUT)               // indicate an IO address
   }
 
-  val base = Vec.fill(2){UInt(width = xLen)}
-  val mask = Vec.fill(2){UInt(width = xLen)}
-  val check = Vec.fill(2){Bool()}
+  val base = Wire(Vec(UInt(width = xLen), 2))
+  val mask = Wire(Vec(UInt(width = xLen), 2))
+  val check = Wire(Vec(Bool(), 2))
 
   base(0) := params(IOBaseAddr0)
   mask(0) := params(IOAddrMask0)
