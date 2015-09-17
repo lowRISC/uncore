@@ -1768,7 +1768,9 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
 
   // NASTI.AW
   val aw_fire = Reg(Bool())
-  aw_fire := io.nasti.aw.fire()
+  when((t_state === t_req0 || t_state === t_req1) && !aw_fire) {
+    aw_fire := io.nasti.aw.fire()
+  }
   io.nasti.aw.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~aw_fire
   io.nasti.aw.bits.id := UInt(0)
   val tlNastiLiteXacts = tlDataBits / nastiXDataBits
@@ -1786,7 +1788,9 @@ class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters
   
   // NASTI.W
   val w_fire = Reg(Bool())
-  w_fire := io.nasti.w.fire()
+  when((t_state === t_req0 || t_state === t_req1) && !w_fire) {
+    w_fire := io.nasti.w.fire()
+  }
   io.nasti.w.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~w_fire
 
   val data_vec = Vec((0 until tlNastiLiteXacts).map(i =>
