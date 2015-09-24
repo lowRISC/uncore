@@ -55,6 +55,8 @@ case object TLBlockAddrBits extends Field[Int]
 case object TLNClients extends Field[Int]
 /** Width of data beats */
 case object TLDataBits extends Field[Int]
+/** Number of bits in write mask (usually one per byte in beat) */
+case object TLWriteMaskBits extends Field[Int]
 /** Number of data beats per cache block */
 case object TLDataBeats extends Field[Int]
 /** Whether the underlying physical network preserved point-to-point ordering of messages */

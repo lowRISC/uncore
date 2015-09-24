@@ -25,7 +25,7 @@ trait TileLinkParameters extends UsesParameters {
   val tlDataBits = params(TLDataBits)
   val tlDataBytes = tlDataBits/8
   val tlDataBeats = params(TLDataBeats)
-  val tlWriteMaskBits = if(tlDataBits/8 < 1) 1 else tlDataBits/8
+  val tlWriteMaskBits = params(TLWriteMaskBits)
   val tlBeatAddrBits = log2Up(tlDataBeats)
   val tlByteAddrBits = log2Up(tlWriteMaskBits)
   val tlMemoryOpcodeBits = M_SZ
@@ -41,15 +41,6 @@ trait TileLinkParameters extends UsesParameters {
   val tlNetworkPreservesPointToPointOrdering = params(TLNetworkIsOrderedP2P)
   val tlNetworkDoesNotInterleaveBeats = true
   val amoAluOperandBits = params(XLen)
-
-  def opSizeToXSize(s: UInt) = MuxLookup(s, UInt("b111"), Array(
-    MT_B  -> UInt(0),
-    MT_H  -> UInt(1),
-    MT_W  -> UInt(2),
-    MT_D  -> UInt(3),
-    MT_BU -> UInt(0),
-    MT_HU -> UInt(1),
-    MT_WU -> UInt(2)))
 }
 
 abstract class TLBundle extends Bundle with TileLinkParameters
@@ -823,7 +814,7 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2) extends TLModule with Has
       assert(getId(io.grant.bits) <= UInt(entries), "Not enough grant beat counters, only " + entries + " entries.")
       connectIncomingDataBeatCountersWithHeader(io.grant, entries, getId).reduce(_||_)
     }
-    val q = Module(new FinishQueue(outstanding, io.grant.bits.header.src.clone))
+    val q = Module(new FinishQueue(outstanding))
     q.io.enq.valid := io.grant.fire() && g.requiresAck() && (!g.hasMultibeatData() || done)
     q.io.enq.bits.fin := g.makeFinish()
     q.io.enq.bits.dst := io.grant.bits.header.src
@@ -841,13 +832,12 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2) extends TLModule with Has
   }
 }
 
-class FinishQueueEntry[T <: Data](dType: T) extends TLBundle {
-  val fin = new Finish
-  val dst = dType.clone
-  override def clone = new FinishQueueEntry(dType).asInstanceOf[this.type]
+class FinishQueueEntry extends TLBundle {
+    val fin = new Finish
+    val dst = UInt(width = params(LNHeaderBits))
 }
 
-class FinishQueue[T <: Data](entries: Int, dType: T) extends Queue(new FinishQueueEntry(dType), entries)
+class FinishQueue(entries: Int) extends Queue(new FinishQueueEntry, entries)
 
 /** A port to convert [[uncore.ClientTileLinkIO]].flip into [[uncore.TileLinkIO]]
   *
@@ -1068,7 +1058,7 @@ trait TileLinkArbiterLike extends TileLinkParameters {
 /** Abstract base case for any Arbiters that have UncachedTileLinkIOs */
 abstract class UncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike {
   val io = new Bundle {
-    val in = Vec.fill(arbN){new UncachedTileLinkIO}.flip
+    val in = Vec(new UncachedTileLinkIO, arbN).flip
     val out = new UncachedTileLinkIO
   }
   hookupClientSource(io.in.map(_.acquire), io.out.acquire)
@@ -1079,7 +1069,7 @@ abstract class UncachedTileLinkIOArbiter(val arbN: Int) extends Module with Tile
 /** Abstract base case for any Arbiters that have cached TileLinkIOs */
 abstract class TileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike {
   val io = new Bundle {
-    val in = Vec.fill(arbN){new TileLinkIO}.flip
+    val in = Vec(new TileLinkIO, arbN).flip
     val out = new TileLinkIO
   }
   hookupClientSource(io.in.map(_.acquire), io.out.acquire)
@@ -1123,7 +1113,7 @@ class TileLinkIOArbiterThatUsesNewId(val n: Int) extends TileLinkIOArbiter(n) wi
 /** Concrete uncached client-side arbiter that appends the arbiter's port id to client_xact_id */
 class ClientUncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike with AppendsArbiterId {
   val io = new Bundle {
-    val in = Vec.fill(arbN){new ClientUncachedTileLinkIO}.flip
+    val in = Vec(new ClientUncachedTileLinkIO, arbN).flip
     val out = new ClientUncachedTileLinkIO
   }
   hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
@@ -1133,7 +1123,7 @@ class ClientUncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLin
 /** Concrete client-side arbiter that appends the arbiter's port id to client_xact_id */
 class ClientTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike with AppendsArbiterId {
   val io = new Bundle {
-    val in = Vec.fill(arbN){new ClientTileLinkIO}.flip
+    val in = Vec(new ClientTileLinkIO, arbN).flip
     val out = new ClientTileLinkIO
   }
   hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
@@ -1497,6 +1487,16 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     val na_b_match = Bool(OUTPUT)
     val na_r_match = Bool(OUTPUT)
   }
+
+  private def opSizeToXSize(ops: UInt) = MuxLookup(ops, UInt("b111"), Seq(
+    MT_B  -> UInt(0),
+    MT_BU -> UInt(0),
+    MT_H  -> UInt(1),
+    MT_HU -> UInt(1),
+    MT_W  -> UInt(2),
+    MT_WU -> UInt(2),
+    MT_D  -> UInt(3),
+    MT_Q  -> UInt(log2Up(tlDataBytes))))
 
   // liminations:
   val dataBits = tlDataBits*tlDataBeats 

@@ -15,6 +15,7 @@ trait CoherenceAgentParameters extends UsesParameters {
   val innerTLParams = params.alterPartial({case TLId => params(InnerTLId)})
   val innerDataBeats = innerTLParams(TLDataBeats)
   val innerDataBits = innerTLParams(TLDataBits)
+  val innerWriteMaskBits = innerTLParams(TLWriteMaskBits)
   val innerBeatAddrBits = log2Up(innerDataBeats)
   val innerByteAddrBits = log2Up(innerDataBits/8)
   require(outerDataBeats == innerDataBeats) //TODO: must fix all xact_data Vecs to remove this requirement
@@ -45,7 +46,7 @@ trait HasCoherenceAgentWiringHelpers {
 
 trait HasInnerTLIO extends CoherenceAgentBundle {
   val inner = Bundle(new ManagerTileLinkIO)(innerTLParams)
-  val incoherent = Vec.fill(inner.tlNCachingClients){Bool()}.asInput
+  val incoherent = Vec(Bool(), inner.tlNCachingClients).asInput
   def iacq(dummy: Int = 0) = inner.acquire.bits
   def iprb(dummy: Int = 0) = inner.probe.bits
   def irel(dummy: Int = 0) = inner.release.bits

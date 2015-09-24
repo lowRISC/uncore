@@ -9,15 +9,15 @@ object MemoryOpConstants extends MemoryOpConstants
 trait MemoryOpConstants {
   val MT_SZ = 4
   val MT_X  = BitPat("b????")
-  val MT_B  = Bits("b0000")
-  val MT_H  = Bits("b0001")
-  val MT_W  = Bits("b0010")
-  val MT_D  = Bits("b0011")
-  val MT_BU = Bits("b0100")
-  val MT_HU = Bits("b0101")
-  val MT_WU = Bits("b0110")
-  val MT_Q  = Bits("b0111")
-  val MT_T  = Bits("b1111") // tag
+  val MT_B  = UInt("b0000")
+  val MT_H  = UInt("b0001")
+  val MT_W  = UInt("b0010")
+  val MT_D  = UInt("b0011")
+  val MT_BU = UInt("b0100")
+  val MT_HU = UInt("b0101")
+  val MT_WU = UInt("b0110")
+  val MT_Q  = UInt("b0111")
+  val MT_T  = UInt("b1111") // tag
 
   val NUM_XA_OPS = 9 // ?? not used
   val M_SZ      = 5
