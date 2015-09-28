@@ -7,12 +7,10 @@ import Chisel._
 case object CacheBlockBytes extends Field[Int]
 case object CacheBlockOffsetBits extends Field[Int]
 
-// IO space
-case object IOBaseAddr0 extends Field[UInt]
-case object IOAddrMask0 extends Field[UInt]
-case object IOBaseAddr1 extends Field[UInt]
-case object IOAddrMask1 extends Field[UInt]
+// IO/Mem space
+case object NIOSections extends Field[Int]
 case object IODataBits extends Field[UInt]
+case object NMemSections extends Field[Int]
 
 //Params used by all caches
 case object NSets extends Field[Int]
