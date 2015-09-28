@@ -17,8 +17,8 @@ class PhysicalNetworkIO[T <: Data](n: Int, dType: T) extends Bundle {
 
 class BasicCrossbarIO[T <: Data](nIP: Int, nOP: Int, dType: T) extends Bundle {
   val nP  = max(nIP, nOP)
-  val in  = Vec.fill(nIP){Decoupled(new PhysicalNetworkIO(nP,dType))}.flip
-  val out = Vec.fill(nOP){Decoupled(new PhysicalNetworkIO(nP,dType))}
+  val in  = Vec(new DecoupledIO(new PhysicalNetworkIO(nP,dType)), nIP).flip
+  val out = Vec(new DecoupledIO(new PhysicalNetworkIO(nP,dType)), nOP)
 }
 
 abstract class PhysicalNetwork extends Module
