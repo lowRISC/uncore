@@ -2,35 +2,68 @@
 
 package uncore
 import Chisel._
-import junctions._
 
 abstract trait IOSpaceParameters extends UsesParameters {
   val xLen = params(XLen)
   val pALen = params(PAddrBits)
+  val nIOSections = params(NIOSections)
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
 class IOSpaceConsts extends Module with IOSpaceParameters {
   val io = new Bundle {
-    val base = Vec(UInt(OUTPUT, xLen), 2) // base for CSR
-    val mask = Vec(UInt(OUTPUT, xLen), 2) // mask for CSR
+    val update = new ValidIO(new PCRUpdate).flip
     val paddr = UInt(INPUT, pALen)        // physical address for IO check
     val isIO = Bool(OUTPUT)               // indicate an IO address
   }
 
-  val base = Wire(Vec(UInt(width = xLen), 2))
-  val mask = Wire(Vec(UInt(width = xLen), 2))
-  val check = Wire(Vec(Bool(), 2))
+  // map registers
+  // effecting pack
+  val base = Reg(Vec(UInt(width=xLen), nIOSections))
+  val mask = Reg(Vec(UInt(width=xLen), nIOSections))
 
-  base(0) := params(IOBaseAddr0)
-  mask(0) := params(IOAddrMask0)
-  base(1) := params(IOBaseAddr1)
-  mask(1) := params(IOAddrMask1)
+  // update pack, enforced after a write to io_map_update
+  val base_update = Reg(Vec(UInt(width=xLen), nIOSections))
+  val mask_update = Reg(Vec(UInt(width=xLen), nIOSections))
 
-  io.base := base
-  io.mask := mask
+  when(this.reset) {
+    base_update(0) := UInt(params(InitIOBase))
+    mask_update(0) := UInt(params(InitIOMask))
 
-  for(i <- 0 until 2) {
+    // disable other IO sections
+    if(NIOSections > 1) {
+      for(i <- 1 until NIOSections) {
+        base_update(i) := UInt(0)
+        mask_update(i) := UInt(0)
+      }
+    }
+
+    // copy update to effect
+    for(i <- 0 until NIOSections) {
+      base(i) := base_update(i)
+      mask(i) := mask_update(i)
+    }
+  }
+
+  // update logic
+  for(i <- 0 until nIOSections) {
+    when(io.update.valid && io.update.bits.addr === UInt(PCRs.pio_map + i*4 + 0)) {
+      base_update(i) := io.update.bits.data
+    }
+    when(io.update.valid && io.update.bits.addr === UInt(PCRs.pio_map + i*4 + 1)) {
+      mask_update(i) := io.update.bits.data
+    }
+  }
+  when(io.update.valid && io.update.bits.addr === UInt(PCRs.pio_map_update)) {
+    for(i <- 0 until NIOSections) {
+      base(i) := base_update(i)
+      mask(i) := mask_update(i)
+    }
+  }
+
+  // checking logic
+  val check = Vec(Bool(), nIOSections)
+  for(i <- 0 until nIOSections) {
     check(i) := (io.paddr & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
   }
   io.isIO := check.reduce(_||_)
