@@ -138,7 +138,7 @@ class PCRControl extends PCRModule {
     req_arb.io.out.bits.data))
 
   // default update
-  val update_arb = Module(new Arbiter(new PCRUpdate, 2))
+  val update_arb = Module(new Arbiter(new PCRUpdate, 3))
   io.pcr_update.valid := update_arb.io.out.valid
   io.pcr_update.bits := update_arb.io.out.bits
   update_arb.io.out.ready := Bool(true)
@@ -151,6 +151,11 @@ class PCRControl extends PCRModule {
   val wall_clock = Reg(init=UInt(0, xLen+6))
   wall_clock := wall_clock + UInt(1)
   reg_time := wall_clock >> 6; // should be replaced by a RTC
+  update_arb.io.in(2).valid := wall_clock(5,0) === UInt(0)
+  update_arb.io.in(2).bits.broadcast := Bool(true)
+  update_arb.io.in(2).bits.coreId := UInt(0)
+  update_arb.io.in(2).bits.addr := UInt(PCRs.ptime)
+  update_arb.io.in(2).bits.data := reg_time
 
   // reset
   io.reset := Bool(false)
