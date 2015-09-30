@@ -11,6 +11,11 @@ case object CacheBlockOffsetBits extends Field[Int]
 case object NIOSections extends Field[Int]
 case object IODataBits extends Field[UInt]
 case object NMemSections extends Field[Int]
+case object InitIOBase extends Field[String]
+case object InitIOMask extends Field[String]
+case object InitMemBase extends Field[String]
+case object InitMemMask extends Field[String]
+case object InitPhyBase extends Field[String]
 
 //Params used by all caches
 case object NSets extends Field[Int]

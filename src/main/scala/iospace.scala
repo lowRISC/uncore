@@ -2,6 +2,7 @@
 
 package uncore
 import Chisel._
+import junctions._
 
 abstract trait IOSpaceParameters extends UsesParameters {
   val xLen = params(XLen)
@@ -31,15 +32,15 @@ class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
     mask_update(0) := UInt(params(InitIOMask))
 
     // disable other IO sections
-    if(NIOSections > 1) {
-      for(i <- 1 until NIOSections) {
+    if(nIOSections > 1) {
+      for(i <- 1 until nIOSections) {
         base_update(i) := UInt(0)
         mask_update(i) := UInt(0)
       }
     }
 
     // copy update to effect
-    for(i <- 0 until NIOSections) {
+    for(i <- 0 until nIOSections) {
       base(i) := base_update(i)
       mask(i) := mask_update(i)
     }
@@ -55,7 +56,7 @@ class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
     }
   }
   when(io.update.valid && io.update.bits.addr === UInt(PCRs.pio_map_update)) {
-    for(i <- 0 until NIOSections) {
+    for(i <- 0 until nIOSections) {
       base(i) := base_update(i)
       mask(i) := mask_update(i)
     }
@@ -63,7 +64,7 @@ class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
 
   // checking logic
   for(c <- 0 until ch) {
-    val check = Vec(Bool(), nIOSections)
+    val check = Wire(Vec(Bool(), nIOSections))
     for(i <- 0 until nIOSections) {
       check(i) := (io.paddr(c) & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
     }

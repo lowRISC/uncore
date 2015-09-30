@@ -4,6 +4,7 @@ package uncore
 
 import Chisel._
 import uncore._
+import uncore.constants._
 
 
 object PCRs {
@@ -43,7 +44,7 @@ class PCRResp extends PCRBundle {
 }
 
 class PCRUpdate extends PCRBundle {
-  val broadast = Bool()
+  val broadcast = Bool()
   val coreId = UInt(width = coreIdBits)
   val addr = UInt(width = addrBits)
   val data = Bits(width = xLen)
@@ -82,26 +83,26 @@ class PCRControl extends PCRModule {
     reg_io_map_mask(0) := UInt(params(InitIOMask))
 
     // disable other Memory sections
-    if(NMemSections > 1) {
-      for(i <- 1 until NMemSections) {
+    if(nMemSections > 1) {
+      for(i <- 1 until nMemSections) {
         reg_mem_map_mask(i) := UInt(0)
       }
     }
 
     // disable other IO sections
-    if(NIOSections > 1) {
-      for(i <- 1 until NIOSections) {
+    if(nIOSections > 1) {
+      for(i <- 1 until nIOSections) {
         reg_io_map_mask(i) := UInt(0)
       }
     }
   }
 
   // request arbitration
-  val req_arb = Module(new RRArbiter(new PCRReq), nCores)
+  val req_arb = Module(new RRArbiter(new PCRReq, nCores))
   req_arb.io.in <> io.pcr_req
   req_arb.io.out.ready :=
      reg_tohost === UInt(0) ||
-     req_arb.io.out.bits.addr != PCRs.ptohost && req_arb.io.out.valid
+     req_arb.io.out.bits.addr != UInt(PCRs.ptohost) && req_arb.io.out.valid
 
   // addr decoding
   val read_mapping = collection.mutable.LinkedHashMap[Int,Bits](
@@ -123,14 +124,14 @@ class PCRControl extends PCRModule {
   }
   read_mapping += PCRs.pio_map_update -> UInt(0)
 
-  val decoded_addr = read_mapping map { case (k, v) => k -> (req_arb.io.out.bits.addr === k) }
+  val decoded_addr = read_mapping map { case (k, v) => k -> (req_arb.io.out.bits.addr === UInt(k)) }
 
   // read response
   io.pcr_resp.valid := req_arb.io.out.fire()
-  io.pcr_resp.bits.coreId := io.pcr_req.bits.coreId
+  io.pcr_resp.bits.coreId := req_arb.io.out.bits.coreId
   io.pcr_resp.bits.data := Mux1H(for ((k, v) <- read_mapping) yield decoded_addr(k) -> v)
 
-  val wen = io.pcr_req.fire() && io.pcr_req.bits.cmd != CSR.R
+  val wen = req_arb.io.out.fire() && req_arb.io.out.bits.cmd != CSR.R
   val wdata =
     Mux(req_arb.io.out.bits.cmd === CSR.C, io.pcr_resp.bits.data & ~req_arb.io.out.bits.data,
     Mux(req_arb.io.out.bits.cmd === CSR.S, io.pcr_resp.bits.data | req_arb.io.out.bits.data,
@@ -147,7 +148,8 @@ class PCRControl extends PCRModule {
 
   // time
   // not writable, wall clock
-  val wall_clock = WideCounter(xLen+6)
+  val wall_clock = Reg(init=UInt(0, xLen+6))
+  wall_clock := wall_clock + UInt(1)
   reg_time := wall_clock >> 6; // should be replaced by a RTC
 
   // reset
@@ -157,13 +159,13 @@ class PCRControl extends PCRModule {
   }
 
   // to/from host
-  when(wen && decoded_addr(PCRs.tohost)) {
+  when(wen && decoded_addr(PCRs.ptohost)) {
     reg_tohost := wdata;
-    reg_tohost_coreId := io.pcr.req.bits.coreId
+    reg_tohost_coreId := req_arb.io.out.bits.coreId
   }
 
   io.host.req.valid := reg_tohost != UInt(0) && io.host.req.ready
-  io.host.req.bits.coreId := reg_tohost_coreId
+  io.host.req.bits.id := reg_tohost_coreId
   io.host.req.bits.data := reg_tohost
 
   when(io.host.req.fire()) {
@@ -172,14 +174,14 @@ class PCRControl extends PCRModule {
 
   io.host.resp.ready := !update_arb.io.in(1).ready
   update_arb.io.in(1).valid := Bool(true)
-  update_arb.io.in(1).broadcast := Bool(false)
+  update_arb.io.in(1).bits.broadcast := Bool(false)
   update_arb.io.in(1).bits.coreId := io.host.resp.bits.id
-  update_arb.io.in(1).bits.addr := PCRs.pfromhost
+  update_arb.io.in(1).bits.addr := UInt(PCRs.pfromhost)
   update_arb.io.in(1).bits.data := io.host.resp.bits.data
 
   // Other updates have no delay, normally broadcasted
   update_arb.io.in(0).valid := Bool(false)
-  update_arb.io.in(0).broadcast := Bool(true)
+  update_arb.io.in(0).bits.broadcast := Bool(true)
   update_arb.io.in(0).bits.coreId := UInt(0)
   update_arb.io.in(0).bits.addr := req_arb.io.out.bits.addr
   update_arb.io.in(0).bits.data := wdata
