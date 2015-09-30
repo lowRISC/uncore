@@ -10,11 +10,11 @@ abstract trait MemSpaceParameters extends UsesParameters {
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
-class MemSpaceConsts extends Module with MemSpaceParameters {
+class MemSpaceConsts(ch: Int) extends Module with MemSpaceParameters {
   val io = new Bundle {
     val update = new ValidIO(new PCRUpdate).flip
-    val core_addr = UInt(INPUT, pALen)        // address from core
-    val phy_addr = UInt(OUTPUT, pALen)        // physical address to outside
+    val core_addr = Vec(UInt(INPUT, pALen), ch)  // address from core
+    val phy_addr = Vec(UInt(OUTPUT, pALen), ch)  // physical address to outside
   }
 
   // map registers
@@ -70,14 +70,15 @@ class MemSpaceConsts extends Module with MemSpaceParameters {
   }
 
   // address converter
-  val addr_vec = Vec(UInt(width=pALen), nMemSections)
-  for(i <- 0 until nMemSections) {
-    addr_vec(i) :=
-      Mux((io.core_paddr & ~ mask(i)(pALen,0)) === cbase(i)(pALen,0),
-        io.core_paddr & mask(i) | pbase(i),
-        UInt(0)
+  for(c <- 0 until ch) {
+    val addr_vec = Vec(UInt(width=pALen), nMemSections)
+    for(i <- 0 until nMemSections) {
+      addr_vec(i) :=
+      Mux((io.core_paddr(c) & ~ mask(i)(pALen,0)) === cbase(i)(pALen,0),
+          io.core_paddr(c) & mask(i) | pbase(i),
+          UInt(0)
       )
-  }
-  io.phy_addr := addr_vec.reduce(_|_)
+    }
+    io.phy_addr(c) := addr_vec.reduce(_|_)
 }
 

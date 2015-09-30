@@ -10,11 +10,11 @@ abstract trait IOSpaceParameters extends UsesParameters {
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
-class IOSpaceConsts extends Module with IOSpaceParameters {
+class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
   val io = new Bundle {
     val update = new ValidIO(new PCRUpdate).flip
-    val paddr = UInt(INPUT, pALen)        // physical address for IO check
-    val isIO = Bool(OUTPUT)               // indicate an IO address
+    val paddr = Vec(UInt(INPUT, pALen), ch)  // physical address for IO check
+    val isIO = Vec(Bool(OUTPUT), ch)         // indicate an IO address
   }
 
   // map registers
@@ -62,10 +62,12 @@ class IOSpaceConsts extends Module with IOSpaceParameters {
   }
 
   // checking logic
-  val check = Vec(Bool(), nIOSections)
-  for(i <- 0 until nIOSections) {
-    check(i) := (io.paddr & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
+  for(c <- 0 until ch) {
+    val check = Vec(Bool(), nIOSections)
+    for(i <- 0 until nIOSections) {
+      check(i) := (io.paddr(c) & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
+    }
+    io.isIO(c) := check.reduce(_||_)
   }
-  io.isIO := check.reduce(_||_)
 }
 
