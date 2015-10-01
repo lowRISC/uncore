@@ -61,7 +61,7 @@ class PCRControl extends PCRModule {
     val pcr_req = Vec(new DecoupledIO(new PCRReq), nCores).flip
     val pcr_resp = new ValidIO(new PCRResp)
     val pcr_update = new ValidIO(new PCRUpdate)
-    val reset = Bool(OUTPUT)
+    val soft_reset = Bool(OUTPUT)
     val host = new HostIO
   }
 
@@ -158,9 +158,9 @@ class PCRControl extends PCRModule {
   update_arb.io.in(2).bits.data := reg_time
 
   // reset
-  io.reset := Bool(false)
+  io.soft_reset := Bool(false)
   when(req_arb.io.out.fire() && decoded_addr(PCRs.preset)) {
-    io.reset := Bool(true)
+    io.soft_reset := Bool(true)
   }
 
   // to/from host
@@ -169,7 +169,7 @@ class PCRControl extends PCRModule {
     reg_tohost_coreId := req_arb.io.out.bits.coreId
   }
 
-  io.host.req.valid := reg_tohost != UInt(0) && io.host.req.ready
+  io.host.req.valid := reg_tohost != UInt(0)
   io.host.req.bits.id := reg_tohost_coreId
   io.host.req.bits.data := reg_tohost
 
@@ -177,8 +177,8 @@ class PCRControl extends PCRModule {
     reg_tohost := UInt(0)
   }
 
-  io.host.resp.ready := !update_arb.io.in(1).ready
-  update_arb.io.in(1).valid := Bool(true)
+  io.host.resp.ready := update_arb.io.in(1).ready
+  update_arb.io.in(1).valid := io.host.resp.valid
   update_arb.io.in(1).bits.broadcast := Bool(false)
   update_arb.io.in(1).bits.coreId := io.host.resp.bits.id
   update_arb.io.in(1).bits.addr := UInt(PCRs.pfromhost)
