@@ -158,9 +158,13 @@ class PCRControl extends PCRModule {
   update_arb.io.in(2).bits.data := reg_time
 
   // reset
-  io.soft_reset := Bool(false)
+  val soft_reset = Reg(init=Bool(false))
+  val (soft_reset_cnt, soft_reset_done) = Counter(soft_reset, 20) // reset for 20 cycles
+  io.soft_reset := soft_reset
   when(req_arb.io.out.fire() && decoded_addr(PCRs.preset)) {
-    io.soft_reset := Bool(true)
+    soft_reset := Bool(true)
+  } .elsewhen(soft_reset_done) {
+    soft_reset := Bool(false)
   }
 
   // to/from host

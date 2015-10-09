@@ -171,7 +171,7 @@ abstract trait L2HellaCacheParameters extends CacheParameters with CoherenceAgen
 }
 
 abstract class L2HellaCacheBundle extends Bundle with L2HellaCacheParameters
-abstract class L2HellaCacheModule extends Module with L2HellaCacheParameters {
+abstract class L2HellaCacheModule(resetSignal:Bool = null) extends Module(_reset = resetSignal) with L2HellaCacheParameters {
   def doInternalOutputArbitration[T <: Data : ClassTag](
       out: DecoupledIO[T],
       ins: Seq[DecoupledIO[T]]) {
@@ -244,7 +244,7 @@ trait HasL2MetaWriteIO extends L2HellaCacheBundle {
 
 class L2MetaRWIO extends L2HellaCacheBundle with HasL2MetaReadIO with HasL2MetaWriteIO
 
-class L2MetadataArray extends L2HellaCacheModule {
+class L2MetadataArray(resetSignal:Bool = null) extends L2HellaCacheModule(resetSignal) {
   val io = new L2MetaRWIO().flip
 
   def onReset = L2Metadata(UInt(0), HierarchicalMetadata.onReset)
@@ -325,7 +325,9 @@ class L2HellaCacheBank extends HierarchicalCoherenceAgent with L2HellaCacheParam
   require(isPow2(nSets))
   require(isPow2(nWays)) 
 
-  val meta = Module(new L2MetadataArray) // TODO: add delay knob
+  val soft_reset = reset || io.soft_reset
+
+  val meta = Module(new L2MetadataArray(soft_reset)) // TODO: add delay knob
   val data = Module(new L2DataArray(1))
   val tshrfile = Module(new TSHRFile)
   io.inner <> tshrfile.io.inner
