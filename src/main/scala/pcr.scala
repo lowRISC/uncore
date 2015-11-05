@@ -16,6 +16,7 @@ object PCRs {
   val pmem_map_update = 0x7af
   val pio_map   = 0x7b0
   val pio_map_update = 0x7bf
+  val pint_map = 0x7c0
 }
 
 
@@ -63,6 +64,8 @@ class PCRControl extends PCRModule {
     val pcr_update = new ValidIO(new PCRUpdate)
     val soft_reset = Bool(OUTPUT)
     val host = new HostIO
+    val interrupt = UInt(INPUT, xLen)
+    val irq = Vec(Bool(OUTPUT), nCores)
   }
 
   // global registers
@@ -74,6 +77,8 @@ class PCRControl extends PCRModule {
   val reg_io_map_mask = Reg(Vec(UInt(width=xLen), nIOSections))
   val reg_tohost = Reg(init = UInt(0,xLen))
   val reg_tohost_coreId = Reg(UInt(width=coreIdBits))
+  val reg_int_en = Reg(Vec(UInt(0,xLen), nCores))
+  val reg_int_pending = Reg(init = UInt(0,xLen))
 
   when(this.reset) {
     reg_mem_map_core_base(0) := UInt(params(InitMemBase))
@@ -111,6 +116,7 @@ class PCRControl extends PCRModule {
     PCRs.preset -> UInt(0)
   )
 
+  // memory map
   for(i <- 0 until nMemSections) {
     read_mapping += PCRs.pmem_map + i*4 + 0 -> reg_mem_map_core_base(i)
     read_mapping += PCRs.pmem_map + i*4 + 1 -> reg_mem_map_mask(i)
@@ -118,11 +124,18 @@ class PCRControl extends PCRModule {
   }
   read_mapping += PCRs.pmem_map_update -> UInt(0)
 
+  // IO map
   for(i <- 0 until nIOSections) {
     read_mapping += PCRs.pio_map + i*4 + 0 -> reg_io_map_base(i)
     read_mapping += PCRs.pio_map + i*4 + 1 -> reg_io_map_mask(i)
   }
   read_mapping += PCRs.pio_map_update -> UInt(0)
+
+  // interrupt map
+  for(i <- 0 until nCores) {
+    read_mapping += PCRs.pint_map + i*2 + 0 -> reg_int_en(i)
+    read_mapping += PCRs.pint_map + i*2 + 1 -> (reg_int_en(i) & reg_int_pending)
+  }
 
   val decoded_addr = read_mapping map { case (k, v) => k -> (req_arb.io.out.bits.addr === UInt(k)) }
 
@@ -233,4 +246,17 @@ class PCRControl extends PCRModule {
   when(wen && decoded_addr(PCRs.pio_map_update)) {
     update_arb.io.in(0).valid := Bool(true)
   }
+
+  // interrupt
+  for(i <- 0 until nCores) {
+    when(wen && decoded_addr(PCRs.pint_map +i*2 + 0)) {
+      reg_int_en(i) := wdata
+    }
+
+    io.irq(i) := (reg_int_pending & reg_int_en(i)) != UInt(0)
+  }
+
+  val int_mask = reg_int_en.reduce(_|_)
+  reg_int_pending := int_mask & io.interrupt;
+
 }
