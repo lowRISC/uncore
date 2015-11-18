@@ -4,7 +4,6 @@ package uncore
 import Chisel._
 import scala.reflect.ClassTag
 import junctions._
-import ChiselComponents._
 
 abstract trait CacheParameters extends UsesParameters {
   val nSets = params(NSets)
@@ -175,7 +174,7 @@ abstract class L2HellaCacheModule(resetSignal:Bool = null) extends Module(_reset
   def doInternalOutputArbitration[T <: Data : ClassTag](
       out: DecoupledIO[T],
       ins: Seq[DecoupledIO[T]]) {
-    val arb = Module(new StableRRArbiter(out.bits, ins.size))
+    val arb = Module(new RRArbiter(out.bits, ins.size, true))
     out <> arb.io.out
     arb.io.in <> ins 
   }
