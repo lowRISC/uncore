@@ -2,10 +2,7 @@
 
 package uncore
 import Chisel._
-
-case object LNMasters extends Field[Int]
-case object LNClients extends Field[Int]
-case object LNEndpoints extends Field[Int]
+import scala.math.max
 
 class PhysicalHeader(n: Int) extends Bundle {
   val src = UInt(width = log2Up(n))
@@ -14,24 +11,25 @@ class PhysicalHeader(n: Int) extends Bundle {
 
 class PhysicalNetworkIO[T <: Data](n: Int, dType: T) extends Bundle {
   val header = new PhysicalHeader(n)
-  val payload = dType.clone
-  override def clone = new PhysicalNetworkIO(n,dType).asInstanceOf[this.type]
+  val payload = dType.cloneType
+  override def cloneType = new PhysicalNetworkIO(n,dType).asInstanceOf[this.type]
 }
 
-class BasicCrossbarIO[T <: Data](n: Int, dType: T) extends Bundle {
-    val in  = Vec.fill(n){Decoupled(new PhysicalNetworkIO(n,dType))}.flip 
-    val out = Vec.fill(n){Decoupled(new PhysicalNetworkIO(n,dType))}
+class BasicCrossbarIO[T <: Data](nIP: Int, nOP: Int, dType: T) extends Bundle {
+  val nP  = max(nIP, nOP)
+  val in  = Vec(new DecoupledIO(new PhysicalNetworkIO(nP,dType)), nIP).flip
+  val out = Vec(new DecoupledIO(new PhysicalNetworkIO(nP,dType)), nOP)
 }
 
 abstract class PhysicalNetwork extends Module
 
-class BasicCrossbar[T <: Data](n: Int, dType: T, count: Int = 1) extends PhysicalNetwork {
-  val io = new BasicCrossbarIO(n, dType)
+class BasicCrossbar[T <: Data](nIP: Int, nOP: Int, dType: T, count: Int = 1, needsLock: Option[PhysicalNetworkIO[T] => Bool] = None) extends PhysicalNetwork {
+  val io = new BasicCrossbarIO(nIP, nOP, dType)
 
-  val rdyVecs = List.fill(n){Vec.fill(n)(Bool())}
+  val rdyVecs = List.fill(nOP){Vec.fill(nIP)(Wire(Bool()))}
 
   io.out.zip(rdyVecs).zipWithIndex.map{ case ((out, rdys), i) => {
-    val rrarb = Module(new LockingRRArbiter(io.in(0).bits, n, count))
+    val rrarb = Module(new LockingRRArbiter(io.in(0).bits, nIP, count, needsLock))
     (rrarb.io.in, io.in, rdys).zipped.map{ case (arb, in, rdy) => {
       arb.valid := in.valid && (in.bits.header.dst === UInt(i)) 
       arb.bits := in.bits
@@ -39,7 +37,7 @@ class BasicCrossbar[T <: Data](n: Int, dType: T, count: Int = 1) extends Physica
     }}
     out <> rrarb.io.out
   }}
-  for(i <- 0 until n) {
+  for(i <- 0 until nIP) {
     io.in(i).ready := rdyVecs.map(r => r(i)).reduceLeft(_||_)
   }
 }
@@ -47,19 +45,22 @@ class BasicCrossbar[T <: Data](n: Int, dType: T, count: Int = 1) extends Physica
 abstract class LogicalNetwork extends Module
 
 class LogicalHeader extends Bundle {
-  val src = UInt(width = log2Up(params(LNEndpoints)))
-  val dst = UInt(width = log2Up(params(LNEndpoints)))
+  val src = UInt(width = params(LNHeaderBits))
+  val dst = UInt(width = params(LNHeaderBits))
 }
 
 class LogicalNetworkIO[T <: Data](dType: T) extends Bundle {
   val header = new LogicalHeader
-  val payload = dType.clone
-  override def clone = { new LogicalNetworkIO(dType).asInstanceOf[this.type] }
+  val payload = dType.cloneType
+  override def cloneType = new LogicalNetworkIO(dType).asInstanceOf[this.type]
 }
 
 object DecoupledLogicalNetworkIOWrapper {
-  def apply[T <: Data](in: DecoupledIO[T], src: UInt = UInt(0), dst: UInt = UInt(0)) = {
-    val out = Decoupled(new LogicalNetworkIO(in.bits.clone)).asDirectionless
+  def apply[T <: Data](
+      in: DecoupledIO[T],
+      src: UInt = UInt(0),
+      dst: UInt = UInt(0)): DecoupledIO[LogicalNetworkIO[T]] = {
+    val out = Wire(Decoupled(new LogicalNetworkIO(in.bits)))
     out.valid := in.valid
     out.bits.payload := in.bits
     out.bits.header.dst := dst
@@ -70,10 +71,32 @@ object DecoupledLogicalNetworkIOWrapper {
 }
 
 object DecoupledLogicalNetworkIOUnwrapper {
-  def apply[T <: Data](in: DecoupledIO[LogicalNetworkIO[T]]) = {
-    val out = Decoupled(in.bits.payload.clone).asDirectionless
+  def apply[T <: Data](in: DecoupledIO[LogicalNetworkIO[T]]): DecoupledIO[T] = {
+    val out = Wire(Decoupled(in.bits.payload))
     out.valid := in.valid
     out.bits := in.bits.payload
+    in.ready := out.ready
+    out
+  }
+}
+
+object DefaultFromPhysicalShim {
+  def apply[T <: Data](in: DecoupledIO[PhysicalNetworkIO[T]]): DecoupledIO[LogicalNetworkIO[T]] = {
+    val out = Wire(Decoupled(new LogicalNetworkIO(in.bits.payload)))
+    out.bits.header := in.bits.header
+    out.bits.payload := in.bits.payload
+    out.valid := in.valid
+    in.ready := out.ready
+    out
+  }
+}
+
+object DefaultToPhysicalShim {
+  def apply[T <: Data](n: Int, in: DecoupledIO[LogicalNetworkIO[T]]): DecoupledIO[PhysicalNetworkIO[T]] = {
+    val out = Wire(Decoupled(new PhysicalNetworkIO(n, in.bits.payload)))
+    out.bits.header := in.bits.header
+    out.bits.payload := in.bits.payload
+    out.valid := in.valid
     in.ready := out.ready
     out
   }
