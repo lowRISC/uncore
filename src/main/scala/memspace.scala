@@ -3,36 +3,38 @@
 package uncore
 import Chisel._
 import junctions._
+import cde.{Parameters, Field}
 
-abstract trait MemSpaceParameters extends UsesParameters {
-  val xLen = params(XLen)
-  val pALen = params(PAddrBits)
-  val nMemSections = params(NMemSections)
+abstract trait MemSpaceParameters{
+  implicit val p: Parameters
+  val xLen = p(XLen)
+  val pALen = p(PAddrBits)
+  val nMemSections = p(NMemSections)
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
-class MemSpaceConsts(ch: Int) extends Module with MemSpaceParameters {
+class MemSpaceConsts(ch: Int)(implicit val p: Parameters) extends Module with MemSpaceParameters {
   val io = new Bundle {
     val update = new ValidIO(new PCRUpdate).flip
-    val core_addr = Vec(UInt(INPUT, pALen), ch)  // address from core
-    val phy_addr = Vec(UInt(OUTPUT, pALen), ch)  // physical address to outside
+    val core_addr = Vec(ch, UInt(INPUT, pALen))  // address from core
+    val phy_addr = Vec(ch, UInt(OUTPUT, pALen))  // physical address to outside
   }
 
   // map registers
   // effecting pack
-  val cbase = Reg(Vec(UInt(width=xLen), nMemSections))
-  val mask = Reg(Vec(UInt(width=xLen), nMemSections))
-  val pbase = Reg(Vec(UInt(width=xLen), nMemSections))
+  val cbase = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val mask = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val pbase = Reg(Vec(nMemSections, UInt(width=xLen)))
 
   // update pack, enforced after a write to mem_map_update
-  val cbase_update = Reg(Vec(UInt(width=xLen), nMemSections))
-  val mask_update = Reg(Vec(UInt(width=xLen), nMemSections))
-  val pbase_update = Reg(Vec(UInt(width=xLen), nMemSections))
+  val cbase_update = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val mask_update = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val pbase_update = Reg(Vec(nMemSections, UInt(width=xLen)))
 
   when(this.reset) {
-    cbase_update(0) := UInt(params(InitMemBase))
-    mask_update(0) := UInt(params(InitMemMask))
-    pbase_update(0) := UInt(params(InitPhyBase))
+    cbase_update(0) := UInt(p(InitMemBase))
+    mask_update(0) := UInt(p(InitMemMask))
+    pbase_update(0) := UInt(p(InitPhyBase))
 
     // disable other IO sections
     if(nMemSections > 1) {
@@ -72,7 +74,7 @@ class MemSpaceConsts(ch: Int) extends Module with MemSpaceParameters {
 
   // address converter
   for(c <- 0 until ch) {
-    val addr_vec = Wire(Vec(UInt(width=pALen), nMemSections))
+    val addr_vec = Wire(Vec(nMemSections, UInt(width=pALen)))
     for(i <- 0 until nMemSections) {
       addr_vec(i) :=
       Mux((io.core_addr(c) & ~ mask(i)(pALen,0)) === cbase(i)(pALen,0),

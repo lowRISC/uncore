@@ -60,4 +60,6 @@ object CSR
   val C = UInt(3,SZ)
   val I = UInt(4,SZ)
   val R = UInt(5,SZ)
+
+  val ADDRSZ = 12
 }

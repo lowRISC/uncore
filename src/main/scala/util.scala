@@ -17,6 +17,10 @@ object MuxBundle {
   def apply[T <: Data] (default: T, mapping: Seq[(Bool, T)]): T = {
     mapping.reverse.foldLeft(default)((b, a) => Mux(a._1, a._2, b))
   }
+
+  def apply[T <: Data] (key: UInt, default: T, mapping: Seq[(UInt, T)]): T = {
+    apply(default, mapping.map{ case (a, b) => (a === key, b) })
+  }
 }
 
 // Produces 0-width value when counting to 1
@@ -42,7 +46,16 @@ object ZCounter {
   }
 }
 
-class FlowThroughSerializer[T <: HasTileLinkData](gen: T, n: Int) extends Module {
+object TwoWayCounter {
+  def apply(up: Bool, down: Bool, max: Int): UInt = {
+    val cnt = Reg(init = UInt(0, log2Up(max+1)))
+    when (up && !down) { cnt := cnt + UInt(1) }
+    when (down && !up) { cnt := cnt - UInt(1) }
+    cnt
+  }
+}
+
+class FlowThroughSerializer[T <: Bundle with HasTileLinkData](gen: T, n: Int) extends Module {
   val io = new Bundle {
     val in = Decoupled(gen).flip
     val out = Decoupled(gen)
@@ -62,7 +75,7 @@ class FlowThroughSerializer[T <: HasTileLinkData](gen: T, n: Int) extends Module
     val rbits = Reg{io.in.bits}
     val active = Reg(init=Bool(false))
 
-    val shifter = Vec(Bits(width = narrowWidth), n)
+    val shifter = Vec(n, Bits(width = narrowWidth))
     (0 until n).foreach { 
       i => shifter(i) := rbits.data((i+1)*narrowWidth-1,i*narrowWidth)
     }
@@ -96,7 +109,7 @@ class FlowThroughSerializer[T <: HasTileLinkData](gen: T, n: Int) extends Module
 }
 
 object FlowThroughSerializer {
-  def apply[T <: HasTileLinkData](in: DecoupledIO[T], n: Int): DecoupledIO[T] = {
+  def apply[T <: Bundle with HasTileLinkData](in: DecoupledIO[T], n: Int): DecoupledIO[T] = {
     val fs = Module(new FlowThroughSerializer(in.bits, n))
     fs.io.in.valid := in.valid
     fs.io.in.bits := in.bits
@@ -124,5 +137,58 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
   } .elsewhen(io.po.fire()) {
     valid := Bool(false)
   }
+}
 
+class ReorderQueueWrite[T <: Data](dType: T, tagWidth: Int) extends Bundle {
+  val data = dType.cloneType
+  val tag = UInt(width = tagWidth)
+
+  override def cloneType =
+    new ReorderQueueWrite(dType, tagWidth).asInstanceOf[this.type]
+}
+
+class ReorderQueue[T <: Data](dType: T, tagWidth: Int, size: Int)
+    extends Module {
+  val io = new Bundle {
+    val enq = Decoupled(new ReorderQueueWrite(dType, tagWidth)).flip
+    val deq = new Bundle {
+      val valid = Bool(INPUT)
+      val tag = UInt(INPUT, tagWidth)
+      val data = dType.cloneType.asOutput
+      val matches = Bool(OUTPUT)
+    }
+  }
+
+  val roq_data = Reg(Vec(size, dType.cloneType))
+  val roq_tags = Reg(Vec(size, UInt(width = tagWidth)))
+  val roq_free = Reg(init = Vec.fill(size)(Bool(true)))
+
+  val roq_enq_addr = PriorityEncoder(roq_free)
+  val roq_matches = roq_tags.zip(roq_free)
+    .map { case (tag, free) => tag === io.deq.tag && !free }
+  val roq_deq_addr = PriorityEncoder(roq_matches)
+
+  io.enq.ready := roq_free.reduce(_ || _)
+  io.deq.data := roq_data(roq_deq_addr)
+  io.deq.matches := roq_matches.reduce(_ || _)
+
+  when (io.enq.valid && io.enq.ready) {
+    roq_data(roq_enq_addr) := io.enq.bits.data
+    roq_tags(roq_enq_addr) := io.enq.bits.tag
+    roq_free(roq_enq_addr) := Bool(false)
+  }
+
+  when (io.deq.valid) {
+    roq_free(roq_deq_addr) := Bool(true)
+  }
+}
+
+object DecoupledHelper {
+  def apply(rvs: Bool*) = new DecoupledHelper(rvs)
+}
+
+class DecoupledHelper(val rvs: Seq[Bool]) {
+  def fire(exclude: Bool, includes: Bool*) = {
+    (rvs.filter(_ ne exclude) ++ includes).reduce(_ && _)
+  }
 }

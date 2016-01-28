@@ -4,27 +4,65 @@ package uncore
 import Chisel._
 import junctions._
 import scala.math.max
+import cde.{Parameters, Field}
 
+case object TLId extends Field[String]
+case class TLKey(id: String) extends Field[TileLinkParameters]
 
+/** Parameters exposed to the top-level design, set based on 
+  * external requirements or design space exploration
+  *
+  * Coherency policy used to define custom mesage types
+  * Number of manager agents
+  * Number of client agents that cache data and use custom [[uncore.Acquire]] types
+  * Number of client agents that do not cache data and use built-in [[uncore.Acquire]] types
+  * Maximum number of unique outstanding transactions per client
+  * Maximum number of clients multiplexed onto a single port
+  * Maximum number of unique outstanding transactions per manager
+  * Width of cache block addresses
+  * Total amount of data per cache block
+  * Number of data beats per cache block
+  **/
+
+case class TileLinkParameters(
+    coherencePolicy: CoherencePolicy,
+    nManagers: Int,
+    nCachingClients: Int,
+    nCachelessClients: Int,
+    maxClientXacts: Int,
+    maxClientsPerPort: Int,
+    maxManagerXacts: Int,
+    dataBits: Int,
+    dataBeats: Int = 4,
+    overrideDataBitsPerBeat: Option[Int] = None
+    ) {
+  val nClients = nCachingClients + nCachelessClients
+  val writeMaskBits: Int  = ((dataBits / dataBeats) - 1) / 8 + 1
+  val dataBitsPerBeat: Int = overrideDataBitsPerBeat.getOrElse(dataBits / dataBeats)
+}
+
+  
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
-trait TileLinkParameters extends UsesParameters {
-  val tlCoh = params(TLCoherencePolicy)
-  val tlNManagers = params(TLNManagers)
-  val tlNClients = params(TLNClients)
-  val tlNCachingClients = params(TLNCachingClients)
-  val tlNCachelessClients = params(TLNCachelessClients)
+trait HasTileLinkParameters {
+  implicit val p: Parameters
+  val tlExternal = p(TLKey(p(TLId)))
+  val tlCoh = tlExternal.coherencePolicy
+  val tlNManagers = tlExternal.nManagers
+  val tlNCachingClients = tlExternal.nCachingClients
+  val tlNCachelessClients = tlExternal.nCachelessClients
+  val tlNClients = tlExternal.nClients
   val tlClientIdBits =  log2Up(tlNClients)
   val tlManagerIdBits =  log2Up(tlNManagers)
-  val tlMaxClientXacts = params(TLMaxClientXacts)
-  val tlMaxClientsPerPort = params(TLMaxClientsPerPort)
-  val tlMaxManagerXacts = params(TLMaxManagerXacts)
+  val tlMaxClientXacts = tlExternal.maxClientXacts
+  val tlMaxClientsPerPort = tlExternal.maxClientsPerPort
+  val tlMaxManagerXacts = tlExternal.maxManagerXacts
   val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort)
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
-  val tlBlockAddrBits = params(TLBlockAddrBits)
-  val tlDataBits = params(TLDataBits)
+  val tlBlockAddrBits = p(PAddrBits) - p(CacheBlockOffsetBits)
+  val tlDataBeats = tlExternal.dataBeats
+  val tlDataBits = tlExternal.dataBitsPerBeat
   val tlDataBytes = tlDataBits/8
-  val tlDataBeats = params(TLDataBeats)
-  val tlWriteMaskBits = params(TLWriteMaskBits)
+  val tlWriteMaskBits = tlExternal.writeMaskBits
   val tlBeatAddrBits = log2Up(tlDataBeats)
   val tlByteAddrBits = log2Up(tlWriteMaskBits)
   val tlMemoryOpcodeBits = M_SZ
@@ -37,32 +75,36 @@ trait TileLinkParameters extends UsesParameters {
                                    tlMemoryOpcodeBits)) + 1
   val tlGrantTypeBits = max(log2Up(Grant.nBuiltInTypes), 
                               tlCoh.grantTypeWidth) + 1
-  val tlNetworkPreservesPointToPointOrdering = params(TLNetworkIsOrderedP2P)
+/** Whether the underlying physical network preserved point-to-point ordering of messages */
+  val tlNetworkPreservesPointToPointOrdering = false
   val tlNetworkDoesNotInterleaveBeats = true
-  val amoAluOperandBits = params(XLen)
+  val amoAluOperandBits = p(AmoAluOperandBits)
+  val amoAluOperandBytes = amoAluOperandBits/8
 }
 
-abstract class TLBundle extends Bundle with TileLinkParameters
-abstract class TLModule extends Module with TileLinkParameters
+abstract class TLModule(implicit val p: Parameters) extends Module
+  with HasTileLinkParameters
+abstract class TLBundle(implicit val p: Parameters) extends junctions.ParameterizedBundle()(p)
+  with HasTileLinkParameters
 
 /** Base trait for all TileLink channels */
-trait TileLinkChannel extends TLBundle {
+abstract class TileLinkChannel(implicit p: Parameters) extends TLBundle()(p) {
   def hasData(dummy: Int = 0): Bool
   def hasMultibeatData(dummy: Int = 0): Bool
 }
 /** Directionality of message channel. Used to hook up logical network ports to physical network ports */
-trait ClientToManagerChannel extends TileLinkChannel
+abstract class ClientToManagerChannel(implicit p: Parameters) extends TileLinkChannel()(p)
 /** Directionality of message channel. Used to hook up logical network ports to physical network ports */
-trait ManagerToClientChannel extends TileLinkChannel
+abstract class ManagerToClientChannel(implicit p: Parameters) extends TileLinkChannel()(p)
 /** Directionality of message channel. Used to hook up logical network ports to physical network ports */
-trait ClientToClientChannel extends TileLinkChannel // Unused for now
+abstract class ClientToClientChannel(implicit p: Parameters) extends TileLinkChannel()(p) // Unused for now
 
 /** Common signals that are used in multiple channels.
   * These traits are useful for type parameterizing bundle wiring functions.
   */
 
 /** Address of a cache block. */
-trait HasCacheBlockAddress extends TLBundle {
+trait HasCacheBlockAddress extends HasTileLinkParameters {
   val addr_block = UInt(width = tlBlockAddrBits)
 
   def conflicts(that: HasCacheBlockAddress) = this.addr_block === that.addr_block
@@ -70,17 +112,17 @@ trait HasCacheBlockAddress extends TLBundle {
 }
 
 /** Sub-block address or beat id of multi-beat data */
-trait HasTileLinkBeatId extends TLBundle {
+trait HasTileLinkBeatId extends HasTileLinkParameters {
   val addr_beat = UInt(width = tlBeatAddrBits)
 }
 
 /* Client-side transaction id. Usually Miss Status Handling Register File index */
-trait HasClientTransactionId extends TLBundle {
+trait HasClientTransactionId extends HasTileLinkParameters {
   val client_xact_id = Bits(width = tlClientXactIdBits)
 }
 
 /** Manager-side transaction id. Usually Transaction Status Handling Register File index. */
-trait HasManagerTransactionId extends TLBundle {
+trait HasManagerTransactionId extends HasTileLinkParameters {
   val manager_xact_id = Bits(width = tlManagerXactIdBits)
 }
 
@@ -92,31 +134,22 @@ trait HasTileLinkData extends HasTileLinkBeatId {
   def hasMultibeatData(dummy: Int = 0): Bool
 }
 
+/** An entire cache block of data */
+trait HasTileLinkBlock extends HasTileLinkParameters {
+  val data_buffer = Vec(tlDataBeats, UInt(width = tlDataBits))
+  val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits))
+}
+
 /** The id of a client source or destination. Used in managers. */
-trait HasClientId extends TLBundle {
+trait HasClientId extends HasTileLinkParameters {
   val client_id = UInt(width = tlClientIdBits)
 }
 
-/** TileLink channel bundle definitions */
-
-/** The Acquire channel is used to intiate coherence protocol transactions in
-  * order to gain access to a cache block's data with certain permissions
-  * enabled. Messages sent over this channel may be custom types defined by
-  * a [[uncore.CoherencePolicy]] for cached data accesse or may be built-in types
-  * used for uncached data accesses. Acquires may contain data for Put or
-  * PutAtomic built-in types. After sending an Acquire, clients must
-  * wait for a manager to send them a [[uncore.Grant]] message in response.
-  */
-class Acquire extends ClientToManagerChannel 
-    with HasCacheBlockAddress 
-    with HasClientTransactionId 
-    with HasTileLinkData {
-  // Actual bundle fields:
-  val is_builtin_type = Bool()
-  val a_type = UInt(width = tlAcquireTypeBits)
+trait HasAcquireUnion extends HasTileLinkParameters {
   val union = Bits(width = tlAcquireUnionBits)
 
   // Utility funcs for accessing subblock union:
+  def isBuiltInType(t: UInt): Bool
   val opCodeOff = 1
   val opSizeOff = tlMemoryOpcodeBits + opCodeOff
   val addrByteOff = tlMemoryOperandSizeBits + opSizeOff
@@ -131,22 +164,28 @@ class Acquire extends ClientToManagerChannel
   def op_size(dummy: Int = 0) = union(addrByteOff-1, opSizeOff)
   /** Byte address for [[uncore.PutAtomic]] operand */
   def addr_byte(dummy: Int = 0) = union(addrByteMSB-1, addrByteOff)
-  private def amo_offset(dummy: Int = 0) = addr_byte()(tlByteAddrBits-1, log2Up(amoAluOperandBits/8))
+  def amo_offset(dummy: Int = 0) = addr_byte()(tlByteAddrBits-1, log2Up(amoAluOperandBytes))
   /** Bit offset of [[uncore.PutAtomic]] operand */
-  def amo_shift_bits(dummy: Int = 0) = UInt(amoAluOperandBits)*amo_offset()
+  def amo_shift_bytes(dummy: Int = 0) = UInt(amoAluOperandBytes)*amo_offset()
   /** Write mask for [[uncore.Put]], [[uncore.PutBlock]], [[uncore.PutAtomic]] */
-  def wmask(dummy: Int = 0) = 
+  def wmask(dummy: Int = 0): UInt = {
+    val amo_word_mask =
+      if (amoAluOperandBytes == tlWriteMaskBits) UInt(1)
+      else UIntToOH(amo_offset())
     Mux(isBuiltInType(Acquire.putAtomicType), 
-      FillInterleaved(amoAluOperandBits/8, UIntToOH(amo_offset())),
+      FillInterleaved(amoAluOperandBytes, amo_word_mask),
       Mux(isBuiltInType(Acquire.putBlockType) || isBuiltInType(Acquire.putType),
         union(tlWriteMaskBits, 1),
         UInt(0, width = tlWriteMaskBits)))
+  }
   /** Full, beat-sized writemask */
   def full_wmask(dummy: Int = 0) = FillInterleaved(8, wmask())
-  /** Complete physical address for block, beat or operand */
-  def full_addr(dummy: Int = 0) = Cat(this.addr_block, this.addr_beat, this.addr_byte())
+}
 
-  // Other helper functions:
+trait HasAcquireType extends HasTileLinkParameters {
+  val is_builtin_type = Bool()
+  val a_type = UInt(width = tlAcquireTypeBits)
+
   /** Message type equality */
   def is(t: UInt) = a_type === t //TODO: make this more opaque; def ===?
 
@@ -159,7 +198,8 @@ class Acquire extends ClientToManagerChannel
   def isSubBlockType(dummy: Int = 0): Bool = isBuiltInType() && Acquire.typesOnSubBlocks.contains(a_type) 
 
   /** Is this message a built-in prefetch message */
-  def isPrefetch(dummy: Int = 0): Bool = isBuiltInType() && is(Acquire.prefetchType) 
+  def isPrefetch(dummy: Int = 0): Bool = isBuiltInType() &&
+                                           (is(Acquire.getPrefetchType) || is(Acquire.putPrefetchType))
 
   /** Does this message contain data? Assumes that no custom message types have data. */
   def hasData(dummy: Int = 0): Bool = isBuiltInType() && Acquire.typesWithData.contains(a_type)
@@ -173,22 +213,93 @@ class Acquire extends ClientToManagerChannel
     */
   def requiresSelfProbe(dummy: Int = 0) = Bool(false)
 
-  /** Mapping between each built-in Acquire type (defined in companion object)
-    * and a built-in Grant type.
-    */
-  def getBuiltInGrantType(dummy: Int = 0): UInt = {
-    MuxLookup(this.a_type, Grant.putAckType, Array(
-      Acquire.getType       -> Grant.getDataBeatType,
-      Acquire.getBlockType  -> Grant.getDataBlockType,
-      Acquire.putType       -> Grant.putAckType,
-      Acquire.putBlockType  -> Grant.putAckType,
-      Acquire.putAtomicType -> Grant.getDataBeatType,
-      Acquire.prefetchType  -> Grant.prefetchAckType))
-  }
+  /** Mapping between each built-in Acquire type and a built-in Grant type.  */
+  def getBuiltInGrantType(dummy: Int = 0): UInt = Acquire.getBuiltInGrantType(this.a_type)
 }
 
+trait HasProbeType extends HasTileLinkParameters {
+  val p_type = UInt(width = tlCoh.probeTypeWidth)
+
+  def is(t: UInt) = p_type === t
+  def hasData(dummy: Int = 0) = Bool(false)
+  def hasMultibeatData(dummy: Int = 0) = Bool(false)
+}
+
+trait HasReleaseType extends HasTileLinkParameters {
+  val voluntary = Bool()
+  val r_type = UInt(width = tlCoh.releaseTypeWidth)
+
+  def is(t: UInt) = r_type === t
+  def hasData(dummy: Int = 0) = tlCoh.releaseTypesWithData.contains(r_type)
+  def hasMultibeatData(dummy: Int = 0) = Bool(tlDataBeats > 1) &&
+                                           tlCoh.releaseTypesWithData.contains(r_type)
+  def isVoluntary(dummy: Int = 0) = voluntary
+  def requiresAck(dummy: Int = 0) = !Bool(tlNetworkPreservesPointToPointOrdering)
+}
+
+trait HasGrantType extends HasTileLinkParameters {
+  val is_builtin_type = Bool()
+  val g_type = UInt(width = tlGrantTypeBits)
+
+  // Helper funcs
+  def isBuiltInType(dummy: Int = 0): Bool = is_builtin_type
+  def isBuiltInType(t: UInt): Bool = is_builtin_type && g_type === t 
+  def is(t: UInt):Bool = g_type === t
+  def hasData(dummy: Int = 0): Bool = Mux(isBuiltInType(),
+                                        Grant.typesWithData.contains(g_type),
+                                        tlCoh.grantTypesWithData.contains(g_type))
+  def hasMultibeatData(dummy: Int = 0): Bool = 
+    Bool(tlDataBeats > 1) && Mux(isBuiltInType(),
+                               Grant.typesWithMultibeatData.contains(g_type),
+                               tlCoh.grantTypesWithData.contains(g_type))
+  def isVoluntary(dummy: Int = 0): Bool = isBuiltInType() && (g_type === Grant.voluntaryAckType)
+  def requiresAck(dummy: Int = 0): Bool = !Bool(tlNetworkPreservesPointToPointOrdering) && !isVoluntary()
+}
+
+/** TileLink channel bundle definitions */
+
+/** The Acquire channel is used to intiate coherence protocol transactions in
+  * order to gain access to a cache block's data with certain permissions
+  * enabled. Messages sent over this channel may be custom types defined by
+  * a [[uncore.CoherencePolicy]] for cached data accesse or may be built-in types
+  * used for uncached data accesses. Acquires may contain data for Put or
+  * PutAtomic built-in types. After sending an Acquire, clients must
+  * wait for a manager to send them a [[uncore.Grant]] message in response.
+  */
+class AcquireMetadata(implicit p: Parameters) extends ClientToManagerChannel
+    with HasCacheBlockAddress 
+    with HasClientTransactionId
+    with HasTileLinkBeatId
+    with HasAcquireType
+    with HasAcquireUnion {
+  /** Complete physical address for block, beat or operand */
+  def full_addr(dummy: Int = 0) = Cat(this.addr_block, this.addr_beat, this.addr_byte())
+}
+
+/** [[uncore.AcquireMetadata]] with an extra field containing the data beat */
+class Acquire(implicit p: Parameters) extends AcquireMetadata
+  with HasTileLinkData
+
+/** [[uncore.AcquireMetadata]] with an extra field containing the entire cache block */
+class BufferedAcquire(implicit p: Parameters) extends AcquireMetadata
+  with HasTileLinkBlock
+
 /** [[uncore.Acquire]] with an extra field stating its source id */
-class AcquireFromSrc extends Acquire with HasClientId
+class AcquireFromSrc(implicit p: Parameters) extends Acquire
+  with HasClientId
+
+/** [[uncore.BufferedAcquire]] with an extra field stating its source id */
+class BufferedAcquireFromSrc(implicit p: Parameters) extends BufferedAcquire
+  with HasClientId 
+
+/** Used to track metadata for transactions where multiple secondary misses have been merged
+  * and handled by a single transaction tracker.
+  */
+class SecondaryMissInfo(implicit p: Parameters) extends TLBundle
+  with HasClientTransactionId
+  with HasTileLinkBeatId
+  with HasClientId
+  with HasAcquireType
 
 /** Contains definitions of the the built-in Acquire types and a factory
   * for [[uncore.Acquire]]
@@ -208,27 +319,58 @@ class AcquireFromSrc extends Acquire with HasClientId
 object Acquire {
   val nBuiltInTypes = 5
   //TODO: Use Enum
-  def getType       = UInt("b000") // Get a single beat of data
-  def getBlockType  = UInt("b001") // Get a whole block of data
-  def putType       = UInt("b010") // Put a single beat of data
-  def putBlockType  = UInt("b011") // Put a whole block of data
-  def putAtomicType = UInt("b100") // Perform an atomic memory op
-  def prefetchType  = UInt("b101") // Prefetch a whole block of data
+  def getType         = UInt("b000") // Get a single beat of data
+  def getBlockType    = UInt("b001") // Get a whole block of data
+  def putType         = UInt("b010") // Put a single beat of data
+  def putBlockType    = UInt("b011") // Put a whole block of data
+  def putAtomicType   = UInt("b100") // Perform an atomic memory op
+  def getPrefetchType = UInt("b101") // Prefetch a whole block of data
+  def putPrefetchType = UInt("b110") // Prefetch a whole block of data, with intent to write
   def typesWithData = Vec(putType, putBlockType, putAtomicType)
   def typesWithMultibeatData = Vec(putBlockType)
   def typesOnSubBlocks = Vec(putType, getType, putAtomicType)
 
-  def fullWriteMask = SInt(-1, width = new Acquire().tlWriteMaskBits).toUInt
+  /** Mapping between each built-in Acquire type and a built-in Grant type. */
+  def getBuiltInGrantType(a_type: UInt): UInt = {
+    MuxLookup(a_type, Grant.putAckType, Array(
+      Acquire.getType       -> Grant.getDataBeatType,
+      Acquire.getBlockType  -> Grant.getDataBlockType,
+      Acquire.putType       -> Grant.putAckType,
+      Acquire.putBlockType  -> Grant.putAckType,
+      Acquire.putAtomicType -> Grant.getDataBeatType,
+      Acquire.getPrefetchType -> Grant.prefetchAckType,
+      Acquire.putPrefetchType -> Grant.prefetchAckType))
+  }
+
+  def makeUnion(
+        a_type: UInt,
+        addr_byte: UInt,
+        operand_size: UInt,
+        opcode: UInt,
+        wmask: UInt,
+        alloc: Bool): UInt = {
+    MuxLookup(a_type, UInt(0), Array(
+      Acquire.getType       -> Cat(addr_byte, operand_size, opcode, alloc),
+      Acquire.getBlockType  -> Cat(operand_size, opcode, alloc),
+      Acquire.putType       -> Cat(wmask, alloc),
+      Acquire.putBlockType  -> Cat(wmask, alloc),
+      Acquire.putAtomicType -> Cat(addr_byte, operand_size, opcode, alloc),
+      Acquire.getPrefetchType -> Cat(M_XRD, alloc),
+      Acquire.putPrefetchType -> Cat(M_XWR, alloc)))
+  }
+
+  def fullWriteMask(implicit p: Parameters) = SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits).toUInt
 
   // Most generic constructor
   def apply(
-      is_builtin_type: Bool,
-      a_type: Bits,
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt = UInt(0),
-      data: UInt = UInt(0),
-      union: UInt = UInt(0)): Acquire = {
+        is_builtin_type: Bool,
+        a_type: Bits,
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt = UInt(0),
+        data: UInt = UInt(0),
+        union: UInt = UInt(0))
+      (implicit p: Parameters): Acquire = {
     val acq = Wire(new Acquire)
     acq.is_builtin_type := is_builtin_type
     acq.a_type := a_type
@@ -239,11 +381,36 @@ object Acquire {
     acq.union := union
     acq
   }
+
   // Copy constructor
   def apply(a: Acquire): Acquire = {
-    val acq = Wire(new Acquire)
+    val acq = Wire(new Acquire()(a.p))
     acq := a
     acq
+  }
+}
+
+object BuiltInAcquireBuilder {
+  def apply(
+        a_type: UInt,
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt = UInt(0),
+        data: UInt = UInt(0),
+        addr_byte: UInt = UInt(0),
+        operand_size: UInt = MT_Q,
+        opcode: UInt = UInt(0),
+        wmask: UInt = UInt(0),
+        alloc: Bool = Bool(true))
+      (implicit p: Parameters): Acquire = {
+    Acquire(
+        is_builtin_type = Bool(true),
+        a_type = a_type,
+        client_xact_id = client_xact_id,
+        addr_block = addr_block,
+        addr_beat = addr_beat,
+        data = data,
+        union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, alloc))
   }
 }
 
@@ -261,32 +428,36 @@ object Acquire {
   */
 object Get {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      alloc: Bool = Bool(true)): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        alloc: Bool = Bool(true))
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.getType,
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
-      union = Cat(MT_Q, M_XRD, alloc))
+      opcode = M_XRD,
+      alloc = alloc)
   }
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      addr_byte: UInt,
-      operand_size: UInt,
-      alloc: Bool): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        addr_byte: UInt,
+        operand_size: UInt,
+        alloc: Bool)
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.getType,
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
-      union = Cat(addr_byte, operand_size, M_XRD, alloc))
+      addr_byte = addr_byte, 
+      operand_size = operand_size,
+      opcode = M_XRD,
+      alloc = alloc)
   }
 }
 
@@ -301,15 +472,16 @@ object Get {
   */
 object GetBlock {
   def apply(
-      client_xact_id: UInt = UInt(0),
-      addr_block: UInt,
-      alloc: Bool = Bool(true)): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt = UInt(0),
+        addr_block: UInt,
+        alloc: Bool = Bool(true))
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.getBlockType,
       client_xact_id = client_xact_id, 
       addr_block = addr_block,
-      union = Cat(MT_Q, M_XRD, alloc))
+      opcode = M_XRD,
+      alloc = alloc)
   }
 }
 
@@ -321,15 +493,13 @@ object GetBlock {
   */
 object GetPrefetch {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
-      a_type = Acquire.prefetchType,
+       client_xact_id: UInt,
+       addr_block: UInt)
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
+      a_type = Acquire.getPrefetchType,
       client_xact_id = client_xact_id,
-      addr_block = addr_block,
-      addr_beat = UInt(0),
-      union = Cat(MT_Q, M_XRD, Bool(true)))
+      addr_block = addr_block)
   }
 }
 
@@ -342,22 +512,25 @@ object GetPrefetch {
   * @param addr_beat sub-block address (which beat)
   * @param data data being refilled to the original requestor
   * @param wmask per-byte write mask for this beat
+  * @param alloc hint whether the block should be allocated in intervening caches
   */
 object Put {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      data: UInt,
-      wmask: UInt = Acquire.fullWriteMask): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        data: UInt,
+        wmask: Option[UInt]= None,
+        alloc: Bool = Bool(true))
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.putType,
       addr_block = addr_block,
       addr_beat = addr_beat,
       client_xact_id = client_xact_id,
       data = data,
-      union = Cat(wmask, Bool(true)))
+      wmask = wmask.getOrElse(Acquire.fullWriteMask),
+      alloc = alloc)
   }
 }
 
@@ -376,34 +549,36 @@ object Put {
   */
 object PutBlock {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      data: UInt,
-      wmask: UInt): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        data: UInt,
+        wmask: UInt)
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.putBlockType,
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
-      union = Cat(wmask, (wmask != Acquire.fullWriteMask)))
+      wmask = wmask,
+      alloc = Bool(true))
   }
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      data: UInt,
-      alloc: Bool = Bool(true)): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        data: UInt,
+        alloc: Bool = Bool(true))
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.putBlockType,
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
-      union = Cat(Acquire.fullWriteMask, alloc))
+      wmask = Acquire.fullWriteMask,
+      alloc = alloc)
   }
 }
 
@@ -415,15 +590,13 @@ object PutBlock {
   */
 object PutPrefetch {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
-      a_type = Acquire.prefetchType,
+        client_xact_id: UInt,
+        addr_block: UInt)
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
+      a_type = Acquire.putPrefetchType,
       client_xact_id = client_xact_id,
-      addr_block = addr_block,
-      addr_beat = UInt(0),
-      union = Cat(M_XWR, Bool(true)))
+      addr_block = addr_block)
   }
 }
 
@@ -439,21 +612,23 @@ object PutPrefetch {
   */
 object PutAtomic {
   def apply(
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt,
-      addr_byte: UInt,
-      atomic_opcode: UInt,
-      operand_size: UInt,
-      data: UInt): Acquire = {
-    Acquire(
-      is_builtin_type = Bool(true),
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt,
+        addr_byte: UInt,
+        atomic_opcode: UInt,
+        operand_size: UInt,
+        data: UInt)
+      (implicit p: Parameters): Acquire = {
+    BuiltInAcquireBuilder(
       a_type = Acquire.putAtomicType,
       client_xact_id = client_xact_id, 
       addr_block = addr_block, 
       addr_beat = addr_beat, 
       data = data,
-      union = Cat(addr_byte, operand_size, atomic_opcode, Bool(true)))
+      addr_byte = addr_byte,
+      operand_size = operand_size,
+      opcode = atomic_opcode)
   }
 }
 
@@ -462,17 +637,12 @@ object PutAtomic {
   * The available types of Probes are customized by a particular
   * [[uncore.CoherencePolicy]].
   */
-class Probe extends ManagerToClientChannel 
-    with HasCacheBlockAddress {
-  val p_type = UInt(width = tlCoh.probeTypeWidth)
-
-  def is(t: UInt) = p_type === t
-  def hasData(dummy: Int = 0) = Bool(false)
-  def hasMultibeatData(dummy: Int = 0) = Bool(false)
-}
+class Probe(implicit p: Parameters) extends ManagerToClientChannel
+  with HasCacheBlockAddress 
+  with HasProbeType
 
 /** [[uncore.Probe]] with an extra field stating its destination id */
-class ProbeToDst extends Probe with HasClientId
+class ProbeToDst(implicit p: Parameters) extends Probe()(p) with HasClientId
 
 /** Contains factories for [[uncore.Probe]] and [[uncore.ProbeToDst]]
   *
@@ -484,13 +654,13 @@ class ProbeToDst extends Probe with HasClientId
   * @param addr_block address of the cache block
   */
 object Probe {
-  def apply(p_type: UInt, addr_block: UInt): Probe = {
+  def apply(p_type: UInt, addr_block: UInt)(implicit p: Parameters): Probe = {
     val prb = Wire(new Probe)
     prb.p_type := p_type
     prb.addr_block := addr_block
     prb
   }
-  def apply(dst: UInt, p_type: UInt, addr_block: UInt): ProbeToDst = {
+  def apply(dst: UInt, p_type: UInt, addr_block: UInt)(implicit p: Parameters): ProbeToDst = {
     val prb = Wire(new ProbeToDst)
     prb.client_id := dst
     prb.p_type := p_type
@@ -506,25 +676,29 @@ object Probe {
   * a particular [[uncore.CoherencePolicy]]. Releases may contain data or may be
   * simple acknowledgements. Voluntary Releases are acknowledged with [[uncore.Grant Grants]].
   */
-class Release extends ClientToManagerChannel 
+class ReleaseMetadata(implicit p: Parameters) extends ClientToManagerChannel
+    with HasTileLinkBeatId
     with HasCacheBlockAddress 
     with HasClientTransactionId 
-    with HasTileLinkData {
-  val r_type = UInt(width = tlCoh.releaseTypeWidth)
-  val voluntary = Bool()
-
-  // Helper funcs
-  def is(t: UInt) = r_type === t
-  def hasData(dummy: Int = 0) = tlCoh.releaseTypesWithData.contains(r_type)
-  //TODO: Assumes all releases write back full cache blocks:
-  def hasMultibeatData(dummy: Int = 0) = Bool(tlDataBeats > 1) && tlCoh.releaseTypesWithData.contains(r_type)
-  def isVoluntary(dummy: Int = 0) = voluntary
-  def requiresAck(dummy: Int = 0) = !Bool(tlNetworkPreservesPointToPointOrdering)
+    with HasReleaseType {
   def full_addr(dummy: Int = 0) = Cat(this.addr_block, this.addr_beat, UInt(0, width = tlByteAddrBits))
 }
 
+/** [[uncore.ReleaseMetadata]] with an extra field containing the data beat */
+class Release(implicit p: Parameters) extends ReleaseMetadata
+  with HasTileLinkData
+
+/** [[uncore.ReleaseMetadata]] with an extra field containing the entire cache block */
+class BufferedRelease(implicit p: Parameters) extends ReleaseMetadata
+  with HasTileLinkBlock
+
 /** [[uncore.Release]] with an extra field stating its source id */
-class ReleaseFromSrc extends Release with HasClientId
+class ReleaseFromSrc(implicit p: Parameters) extends Release
+  with HasClientId
+
+/** [[uncore.BufferedRelease]] with an extra field stating its source id */
+class BufferedReleaseFromSrc(implicit p: Parameters) extends BufferedRelease
+  with HasClientId
 
 /** Contains a [[uncore.Release]] factory
   *
@@ -540,12 +714,13 @@ class ReleaseFromSrc extends Release with HasClientId
   */
 object Release {
   def apply(
-      voluntary: Bool,
-      r_type: UInt,
-      client_xact_id: UInt,
-      addr_block: UInt,
-      addr_beat: UInt = UInt(0),
-      data: UInt = UInt(0)): Release = {
+        voluntary: Bool,
+        r_type: UInt,
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt = UInt(0),
+        data: UInt = UInt(0))
+      (implicit p: Parameters): Release = {
     val rel = Wire(new Release)
     rel.r_type := r_type
     rel.client_xact_id := client_xact_id
@@ -564,35 +739,33 @@ object Release {
   * coherence policies may also define custom Grant types. Grants may contain data
   * or may be simple acknowledgements. Grants are responded to with [[uncore.Finish]].
   */
-class Grant extends ManagerToClientChannel 
-    with HasTileLinkData 
+class GrantMetadata(implicit p: Parameters) extends ManagerToClientChannel
+    with HasTileLinkBeatId
     with HasClientTransactionId 
-    with HasManagerTransactionId {
-  val is_builtin_type = Bool()
-  val g_type = UInt(width = tlGrantTypeBits)
-
-  // Helper funcs
-  def isBuiltInType(dummy: Int = 0): Bool = is_builtin_type
-  def isBuiltInType(t: UInt): Bool = is_builtin_type && g_type === t 
-  def is(t: UInt):Bool = g_type === t
-  def hasData(dummy: Int = 0): Bool = Mux(isBuiltInType(),
-                                        Grant.typesWithData.contains(g_type),
-                                        tlCoh.grantTypesWithData.contains(g_type))
-  def hasMultibeatData(dummy: Int = 0): Bool = 
-    Bool(tlDataBeats > 1) && Mux(isBuiltInType(),
-                               Grant.typesWithMultibeatData.contains(g_type),
-                               tlCoh.grantTypesWithData.contains(g_type))
-  def isVoluntary(dummy: Int = 0): Bool = isBuiltInType() && (g_type === Grant.voluntaryAckType)
-  def requiresAck(dummy: Int = 0): Bool = !Bool(tlNetworkPreservesPointToPointOrdering) && !isVoluntary()
+    with HasManagerTransactionId
+    with HasGrantType {
   def makeFinish(dummy: Int = 0): Finish = {
-    val f = Wire(Bundle(new Finish, { case TLMaxManagerXacts => tlMaxManagerXacts }))
+    val f = Wire(new Finish)
     f.manager_xact_id := this.manager_xact_id
     f
   }
 }
 
+/** [[uncore.GrantMetadata]] with an extra field containing a single beat of data */
+class Grant(implicit p: Parameters) extends GrantMetadata
+  with HasTileLinkData
+
 /** [[uncore.Grant]] with an extra field stating its destination */
-class GrantToDst extends Grant with HasClientId
+class GrantToDst(implicit p: Parameters) extends Grant
+  with HasClientId
+
+/** [[uncore.GrantMetadata]] with an extra field containing an entire cache block */
+class BufferedGrant(implicit p: Parameters) extends GrantMetadata
+  with HasTileLinkBlock
+
+/** [[uncore.BufferedGrant]] with an extra field stating its destination */
+class BufferedGrantToDst(implicit p: Parameters) extends BufferedGrant
+  with HasClientId
 
 /** Contains definitions of the the built-in grant types and factories 
   * for [[uncore.Grant]] and [[uncore.GrantToDst]]
@@ -619,12 +792,13 @@ object Grant {
   def typesWithMultibeatData= Vec(getDataBlockType)
 
   def apply(
-      is_builtin_type: Bool,
-      g_type: UInt,
-      client_xact_id: UInt, 
-      manager_xact_id: UInt,
-      addr_beat: UInt,
-      data: UInt): Grant = {
+        is_builtin_type: Bool,
+        g_type: UInt,
+        client_xact_id: UInt, 
+        manager_xact_id: UInt,
+        addr_beat: UInt,
+        data: UInt)
+      (implicit p: Parameters): Grant = {
     val gnt = Wire(new Grant)
     gnt.is_builtin_type := is_builtin_type
     gnt.g_type := g_type
@@ -636,13 +810,14 @@ object Grant {
   }
 
   def apply(
-      dst: UInt,
-      is_builtin_type: Bool,
-      g_type: UInt,
-      client_xact_id: UInt,
-      manager_xact_id: UInt,
-      addr_beat: UInt = UInt(0),
-      data: UInt = UInt(0)): GrantToDst = {
+        dst: UInt,
+        is_builtin_type: Bool,
+        g_type: UInt,
+        client_xact_id: UInt,
+        manager_xact_id: UInt,
+        addr_beat: UInt = UInt(0),
+        data: UInt = UInt(0))
+      (implicit p: Parameters): GrantToDst = {
     val gnt = Wire(new GrantToDst)
     gnt.client_id := dst
     gnt.is_builtin_type := is_builtin_type
@@ -661,20 +836,21 @@ object Grant {
   * When a Finish message is received, a manager knows it is safe to begin
   * processing other transactions that touch the same cache block.
   */
-class Finish extends ClientToManagerChannel with HasManagerTransactionId {
+class Finish(implicit p: Parameters) extends ClientToManagerChannel()(p)
+    with HasManagerTransactionId {
   def hasData(dummy: Int = 0) = Bool(false)
   def hasMultibeatData(dummy: Int = 0) = Bool(false)
 }
 
 /** Complete IO definition for incoherent TileLink, including networking headers */
-class UncachedTileLinkIO extends TLBundle {
+class UncachedTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
   val acquire   = new DecoupledIO(new LogicalNetworkIO(new Acquire))
   val grant     = new DecoupledIO(new LogicalNetworkIO(new Grant)).flip
   val finish = new DecoupledIO(new LogicalNetworkIO(new Finish))
 }
 
 /** Complete IO definition for coherent TileLink, including networking headers */
-class TileLinkIO extends UncachedTileLinkIO {
+class TileLinkIO(implicit p: Parameters) extends UncachedTileLinkIO()(p) {
   val probe     = new DecoupledIO(new LogicalNetworkIO(new Probe)).flip
   val release   = new DecoupledIO(new LogicalNetworkIO(new Release))
 }
@@ -691,7 +867,7 @@ class TileLinkIO extends UncachedTileLinkIO {
   * assumption that a [[uncore.FinishUnit]] has been coupled to the TileLinkIO port
   * to deal with acking received [[uncore.Grant Grants]].
   */
-class ClientUncachedTileLinkIO extends TLBundle {
+class ClientUncachedTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
   val acquire   = new DecoupledIO(new Acquire)
   val grant     = new DecoupledIO(new Grant).flip
 }
@@ -699,7 +875,7 @@ class ClientUncachedTileLinkIO extends TLBundle {
 /** This version of TileLinkIO does not contain network headers. 
   * It is intended for use within client agents.
   */
-class ClientTileLinkIO extends ClientUncachedTileLinkIO {
+class ClientTileLinkIO(implicit p: Parameters) extends ClientUncachedTileLinkIO()(p) {
   val probe     = new DecoupledIO(new Probe).flip
   val release   = new DecoupledIO(new Release)
 }
@@ -718,7 +894,7 @@ class ClientTileLinkIO extends ClientUncachedTileLinkIO {
   * see Finished so they know when to allow new transactions on a cache
   * block to proceed.
   */
-class ManagerTileLinkIO extends TLBundle {
+class ManagerTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
   val acquire   = new DecoupledIO(new AcquireFromSrc).flip
   val grant     = new DecoupledIO(new GrantToDst)
   val finish    = new DecoupledIO(new Finish).flip
@@ -726,210 +902,11 @@ class ManagerTileLinkIO extends TLBundle {
   val release   = new DecoupledIO(new ReleaseFromSrc).flip
 }
 
-/** Utilities for safely wrapping a *UncachedTileLink by pinning probe.ready and release.valid low */
-object TileLinkIOWrapper {
-  def apply(utl: ClientUncachedTileLinkIO, p: Parameters): ClientTileLinkIO = {
-    val conv = Module(new ClientTileLinkIOWrapper)(p)
-    conv.io.in <> utl
-    conv.io.out
-  }
-  def apply(utl: ClientUncachedTileLinkIO): ClientTileLinkIO = {
-    val conv = Module(new ClientTileLinkIOWrapper)
-    conv.io.in <> utl
-    conv.io.out
-  }
-  def apply(tl: ClientTileLinkIO): ClientTileLinkIO = tl
-  def apply(utl: UncachedTileLinkIO, p: Parameters): TileLinkIO = {
-    val conv = Module(new TileLinkIOWrapper)(p)
-    conv.io.in <> utl
-    conv.io.out
-  }
-  def apply(utl: UncachedTileLinkIO): TileLinkIO = {
-    val conv = Module(new TileLinkIOWrapper)
-    conv.io.in <> utl
-    conv.io.out
-  }
-  def apply(tl: TileLinkIO): TileLinkIO = tl
-}
-
-class TileLinkIOWrapper extends TLModule {
-  val io = new Bundle {
-    val in = new UncachedTileLinkIO().flip
-    val out = new TileLinkIO
-  }
-  io.out.acquire <> io.in.acquire
-  io.in.grant <> io.out.grant
-  io.out.finish <> io.in.finish
-  io.out.probe.ready := Bool(true)
-  io.out.release.valid := Bool(false)
-}
-
-class ClientTileLinkIOWrapper extends TLModule {
-  val io = new Bundle {
-    val in = new ClientUncachedTileLinkIO().flip
-    val out = new ClientTileLinkIO
-  }
-  io.out.acquire <> io.in.acquire
-  io.in.grant <> io.out.grant
-  io.out.probe.ready := Bool(true)
-  io.out.release.valid := Bool(false)
-}
-
-/** Used to track metadata for transactions where multiple secondary misses have been merged
-  * and handled by a single transaction tracker.
-  */
-class SecondaryMissInfo extends TLBundle // TODO: add a_type to merge e.g. Get+GetBlocks, and/or HasClientId
-    with HasTileLinkBeatId
-    with HasClientTransactionId
-
-/** A helper module that automatically issues [[uncore.Finish]] messages in repsonse
-  * to [[uncore.Grant]] that it receives from a manager and forwards to a client
-  */
-class FinishUnit(srcId: Int = 0, outstanding: Int = 2) extends TLModule with HasDataBeatCounters {
-  val io = new Bundle {
-    val grant = Decoupled(new LogicalNetworkIO(new Grant)).flip
-    val refill = Decoupled(new Grant)
-    val finish = Decoupled(new LogicalNetworkIO(new Finish))
-    val ready = Bool(OUTPUT)
-  }
-
-  val g = io.grant.bits.payload
-
-  if(tlNetworkPreservesPointToPointOrdering) {
-    io.finish.valid := Bool(false)
-    io.refill.valid := io.grant.valid
-    io.refill.bits := g
-    io.grant.ready := io.refill.ready
-    io.ready := Bool(true)
-  } else {
-    // We only want to send Finishes after we have collected all beats of
-    // a multibeat Grant. But Grants from multiple managers or transactions may
-    // get interleaved, so we could need a counter for each.
-    val done = if(tlNetworkDoesNotInterleaveBeats) {
-      connectIncomingDataBeatCounterWithHeader(io.grant)
-    } else {
-      val entries = 1 << tlClientXactIdBits
-      def getId(g: LogicalNetworkIO[Grant]) = g.payload.client_xact_id
-      assert(getId(io.grant.bits) <= UInt(entries), "Not enough grant beat counters, only " + entries + " entries.")
-      connectIncomingDataBeatCountersWithHeader(io.grant, entries, getId).reduce(_||_)
-    }
-    val q = Module(new FinishQueue(outstanding))
-    q.io.enq.valid := io.grant.fire() && g.requiresAck() && (!g.hasMultibeatData() || done)
-    q.io.enq.bits.fin := g.makeFinish()
-    q.io.enq.bits.dst := io.grant.bits.header.src
-
-    io.finish.bits.header.src := UInt(srcId)
-    io.finish.bits.header.dst := q.io.deq.bits.dst
-    io.finish.bits.payload := q.io.deq.bits.fin
-    io.finish.valid := q.io.deq.valid
-    q.io.deq.ready := io.finish.ready
-
-    io.refill.valid := io.grant.valid
-    io.refill.bits := g
-    io.grant.ready := (q.io.enq.ready || !g.requiresAck()) && io.refill.ready
-    io.ready := q.io.enq.ready
-  }
-}
-
-class FinishQueueEntry extends TLBundle {
-    val fin = new Finish
-    val dst = UInt(width = params(LNHeaderBits))
-}
-
-class FinishQueue(entries: Int) extends Queue(new FinishQueueEntry, entries)
-
-/** A port to convert [[uncore.ClientTileLinkIO]].flip into [[uncore.TileLinkIO]]
-  *
-  * Creates network headers for [[uncore.Acquire]] and [[uncore.Release]] messages,
-  * calculating header.dst and filling in header.src.
-  * Strips headers from [[uncore.Probe Probes]].
-  * Responds to [[uncore.Grant]] by automatically issuing [[uncore.Finish]] to the granting managers.
-  *
-  * @param clientId network port id of this agent
-  * @param addrConvert how a physical address maps to a destination manager port id
-  */
-class ClientTileLinkNetworkPort(clientId: Int, addrConvert: UInt => UInt) extends TLModule {
-  val io = new Bundle {
-    val client = new ClientTileLinkIO().flip
-    val network = new TileLinkIO
-  }
-
-  val finisher = Module(new FinishUnit(clientId))
-  finisher.io.grant <> io.network.grant
-  io.network.finish <> finisher.io.finish
-
-  val acq_with_header = ClientTileLinkHeaderCreator(io.client.acquire, clientId, addrConvert)
-  val rel_with_header = ClientTileLinkHeaderCreator(io.client.release, clientId, addrConvert)
-  val prb_without_header = DecoupledLogicalNetworkIOUnwrapper(io.network.probe)
-  val gnt_without_header = finisher.io.refill
-
-  io.network.acquire.bits := acq_with_header.bits
-  io.network.acquire.valid := acq_with_header.valid && finisher.io.ready
-  acq_with_header.ready := io.network.acquire.ready && finisher.io.ready
-  io.network.release <> rel_with_header
-  io.client.probe <> prb_without_header
-  io.client.grant <> gnt_without_header
-}
-
-object ClientTileLinkHeaderCreator {
-  def apply[T <: ClientToManagerChannel with HasCacheBlockAddress](
-      in: DecoupledIO[T],
-      clientId: Int,
-      addrConvert: UInt => UInt): DecoupledIO[LogicalNetworkIO[T]] = {
-    val out = Wire(new DecoupledIO(new LogicalNetworkIO(in.bits)))
-    out.bits.payload := in.bits
-    out.bits.header.src := UInt(clientId)
-    out.bits.header.dst := addrConvert(in.bits.addr_block)
-    out.valid := in.valid
-    in.ready := out.ready
-    out
-  }
-}
-
-/** A port to convert [[uncore.ManagerTileLinkIO]].flip into [[uncore.TileLinkIO]].flip
-  *
-  * Creates network headers for [[uncore.Probe]] and [[uncore.Grant]] messagess,
-  * calculating header.dst and filling in header.src.
-  * Strips headers from [[uncore.Acquire]], [[uncore.Release]] and [[uncore.Finish]],
-  * but supplies client_id instead.
-  *
-  * @param managerId the network port id of this agent
-  * @param idConvert how a sharer id maps to a destination client port id
-  */
-class ManagerTileLinkNetworkPort(managerId: Int, idConvert: UInt => UInt) extends TLModule {
-  val io = new Bundle {
-    val manager = new ManagerTileLinkIO().flip
-    val network = new TileLinkIO().flip
-  }
-  io.network.grant <> ManagerTileLinkHeaderCreator(io.manager.grant, managerId, (u: UInt) => u)
-  io.network.probe <> ManagerTileLinkHeaderCreator(io.manager.probe, managerId, idConvert)
-  io.manager.acquire.bits.client_id := io.network.acquire.bits.header.src
-  io.manager.acquire <> DecoupledLogicalNetworkIOUnwrapper(io.network.acquire)
-  io.manager.release.bits.client_id := io.network.release.bits.header.src
-  io.manager.release <> DecoupledLogicalNetworkIOUnwrapper(io.network.release)
-  io.manager.finish <> DecoupledLogicalNetworkIOUnwrapper(io.network.finish)
-}
-
-object ManagerTileLinkHeaderCreator {
-  def apply[T <: ManagerToClientChannel with HasClientId](
-      in: DecoupledIO[T],
-      managerId: Int,
-      idConvert: UInt => UInt): DecoupledIO[LogicalNetworkIO[T]] = {
-    val out = Wire(new DecoupledIO(new LogicalNetworkIO(in.bits)))
-    out.bits.payload := in.bits
-    out.bits.header.src := UInt(managerId)
-    out.bits.header.dst := idConvert(in.bits.client_id)
-    out.valid := in.valid
-    in.ready := out.ready
-    out
-  }
-}
-
 /** Struct for describing per-channel queue depths */
 case class TileLinkDepths(acq: Int, prb: Int, rel: Int, gnt: Int, fin: Int)
 
 /** Optionally enqueues each [[uncore.TileLinkChannel]] individually */
-class TileLinkEnqueuer(depths: TileLinkDepths) extends Module {
+class TileLinkEnqueuer(depths: TileLinkDepths)(implicit p: Parameters) extends Module {
   val io = new Bundle {
     val client = new TileLinkIO().flip
     val manager = new TileLinkIO
@@ -942,18 +919,41 @@ class TileLinkEnqueuer(depths: TileLinkDepths) extends Module {
 }
 
 object TileLinkEnqueuer {
-  def apply(in: TileLinkIO, depths: TileLinkDepths)(p: Parameters): TileLinkIO = {
-    val t = Module(new TileLinkEnqueuer(depths))(p)
+  def apply(in: TileLinkIO, depths: TileLinkDepths)(implicit p: Parameters): TileLinkIO = {
+    val t = Module(new TileLinkEnqueuer(depths))
     t.io.client <> in
     t.io.manager
   }
-  def apply(in: TileLinkIO, depth: Int)(p: Parameters): TileLinkIO = {
-    apply(in, TileLinkDepths(depth, depth, depth, depth, depth))(p)
+  def apply(in: TileLinkIO, depth: Int)(implicit p: Parameters): TileLinkIO = {
+    apply(in, TileLinkDepths(depth, depth, depth, depth, depth))
+  }
+}
+
+class ClientTileLinkEnqueuer(depths: TileLinkDepths)(implicit p: Parameters) extends Module {
+  val io = new Bundle {
+    val inner = new ClientTileLinkIO().flip
+    val outer = new ClientTileLinkIO
+  }
+
+  io.outer.acquire <> (if(depths.acq > 0) Queue(io.inner.acquire, depths.acq) else io.inner.acquire)
+  io.inner.probe   <> (if(depths.prb > 0) Queue(io.outer.probe,   depths.prb) else io.outer.probe)
+  io.outer.release <> (if(depths.rel > 0) Queue(io.inner.release, depths.rel) else io.inner.release)
+  io.inner.grant   <> (if(depths.gnt > 0) Queue(io.outer.grant,   depths.gnt) else io.outer.grant)
+}
+
+object ClientTileLinkEnqueuer {
+  def apply(in: ClientTileLinkIO, depths: TileLinkDepths)(implicit p: Parameters): ClientTileLinkIO = {
+    val t = Module(new ClientTileLinkEnqueuer(depths))
+    t.io.inner <> in
+    t.io.outer
+  }
+  def apply(in: ClientTileLinkIO, depth: Int)(implicit p: Parameters): ClientTileLinkIO = {
+    apply(in, TileLinkDepths(depth, depth, depth, depth, depth))
   }
 }
 
 /** Utility functions for constructing TileLinkIO arbiters */
-trait TileLinkArbiterLike extends TileLinkParameters {
+trait TileLinkArbiterLike extends HasTileLinkParameters {
   // Some shorthand type variables
   type ManagerSourcedWithId = ManagerToClientChannel with HasClientTransactionId
   type ClientSourcedWithId = ClientToManagerChannel with HasClientTransactionId
@@ -1055,9 +1055,10 @@ trait TileLinkArbiterLike extends TileLinkParameters {
 }
 
 /** Abstract base case for any Arbiters that have UncachedTileLinkIOs */
-abstract class UncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike {
+abstract class UncachedTileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) extends Module
+    with TileLinkArbiterLike {
   val io = new Bundle {
-    val in = Vec(new UncachedTileLinkIO, arbN).flip
+    val in = Vec(arbN, new UncachedTileLinkIO).flip
     val out = new UncachedTileLinkIO
   }
   hookupClientSource(io.in.map(_.acquire), io.out.acquire)
@@ -1066,9 +1067,10 @@ abstract class UncachedTileLinkIOArbiter(val arbN: Int) extends Module with Tile
 }
 
 /** Abstract base case for any Arbiters that have cached TileLinkIOs */
-abstract class TileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike {
+abstract class TileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) extends Module
+    with TileLinkArbiterLike {
   val io = new Bundle {
-    val in = Vec(new TileLinkIO, arbN).flip
+    val in = Vec(arbN, new TileLinkIO).flip
     val out = new TileLinkIO
   }
   hookupClientSource(io.in.map(_.acquire), io.out.acquire)
@@ -1102,17 +1104,17 @@ trait UsesNewId extends TileLinkArbiterLike {
 }
 
 // Now we can mix-in thevarious id-generation traits to make concrete arbiter classes
-class UncachedTileLinkIOArbiterThatAppendsArbiterId(val n: Int) extends UncachedTileLinkIOArbiter(n) with AppendsArbiterId
-class UncachedTileLinkIOArbiterThatPassesId(val n: Int) extends UncachedTileLinkIOArbiter(n) with PassesId
-class UncachedTileLinkIOArbiterThatUsesNewId(val n: Int) extends UncachedTileLinkIOArbiter(n) with UsesNewId
-class TileLinkIOArbiterThatAppendsArbiterId(val n: Int) extends TileLinkIOArbiter(n) with AppendsArbiterId
-class TileLinkIOArbiterThatPassesId(val n: Int) extends TileLinkIOArbiter(n) with PassesId
-class TileLinkIOArbiterThatUsesNewId(val n: Int) extends TileLinkIOArbiter(n) with UsesNewId
+class UncachedTileLinkIOArbiterThatAppendsArbiterId(val n: Int)(implicit p: Parameters) extends UncachedTileLinkIOArbiter(n)(p) with AppendsArbiterId
+class UncachedTileLinkIOArbiterThatPassesId(val n: Int)(implicit p: Parameters) extends UncachedTileLinkIOArbiter(n)(p) with PassesId
+class UncachedTileLinkIOArbiterThatUsesNewId(val n: Int)(implicit p: Parameters) extends UncachedTileLinkIOArbiter(n)(p) with UsesNewId
+class TileLinkIOArbiterThatAppendsArbiterId(val n: Int)(implicit p: Parameters) extends TileLinkIOArbiter(n)(p) with AppendsArbiterId
+class TileLinkIOArbiterThatPassesId(val n: Int)(implicit p: Parameters) extends TileLinkIOArbiter(n)(p) with PassesId
+class TileLinkIOArbiterThatUsesNewId(val n: Int)(implicit p: Parameters) extends TileLinkIOArbiter(n)(p) with UsesNewId
 
 /** Concrete uncached client-side arbiter that appends the arbiter's port id to client_xact_id */
-class ClientUncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike with AppendsArbiterId {
+class ClientUncachedTileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) extends Module with TileLinkArbiterLike with AppendsArbiterId {
   val io = new Bundle {
-    val in = Vec(new ClientUncachedTileLinkIO, arbN).flip
+    val in = Vec(arbN, new ClientUncachedTileLinkIO).flip
     val out = new ClientUncachedTileLinkIO
   }
   hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
@@ -1120,9 +1122,9 @@ class ClientUncachedTileLinkIOArbiter(val arbN: Int) extends Module with TileLin
 }
 
 /** Concrete client-side arbiter that appends the arbiter's port id to client_xact_id */
-class ClientTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiterLike with AppendsArbiterId {
+class ClientTileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) extends Module with TileLinkArbiterLike with AppendsArbiterId {
   val io = new Bundle {
-    val in = Vec(new ClientTileLinkIO, arbN).flip
+    val in = Vec(arbN, new ClientTileLinkIO).flip
     val out = new ClientTileLinkIO
   }
   hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
@@ -1130,90 +1132,10 @@ class ClientTileLinkIOArbiter(val arbN: Int) extends Module with TileLinkArbiter
   hookupManagerSourceBroadcast(io.in.map(_.probe), io.out.probe)
   hookupManagerSourceHeaderlessWithId(io.in.map(_.grant), io.out.grant)
 }
-
-/** Utility trait containing wiring functions to keep track of how many data beats have 
-  * been sent or recieved over a particular [[uncore.TileLinkChannel]] or pair of channels. 
-  *
-  * Won't count message types that don't have data. 
-  * Used in [[uncore.XactTracker]] and [[uncore.FinishUnit]].
-  */
-trait HasDataBeatCounters {
-  type HasBeat = TileLinkChannel with HasTileLinkBeatId
-
-  /** Returns the current count on this channel and when a message is done
-    * @param inc increment the counter (usually .valid or .fire())
-    * @param data the actual channel data
-    * @param beat count to return for single-beat messages
-    */
-  def connectDataBeatCounter[S <: TileLinkChannel](inc: Bool, data: S, beat: UInt) = {
-    val multi = data.hasMultibeatData()
-    val (multi_cnt, multi_done) = Counter(inc && multi, data.tlDataBeats)
-    val cnt = Mux(multi, multi_cnt, beat)
-    val done = Mux(multi, multi_done, inc)
-    (cnt, done)
-  }
-
-  /** Counter for beats on outgoing [[chisel.DecoupledIO]] */
-  def connectOutgoingDataBeatCounter[T <: TileLinkChannel](in: DecoupledIO[T], beat: UInt = UInt(0)): (UInt, Bool) =
-    connectDataBeatCounter(in.fire(), in.bits, beat)
-
-  /** Returns done but not cnt. Use the addr_beat subbundle instead of cnt for beats on 
-    * incoming channels in case of network reordering.
-    */
-  def connectIncomingDataBeatCounter[T <: TileLinkChannel](in: DecoupledIO[T]): Bool =
-    connectDataBeatCounter(in.fire(), in.bits, UInt(0))._2
-
-  /** Counter for beats on incoming DecoupledIO[LogicalNetworkIO[]]s returns done */
-  def connectIncomingDataBeatCounterWithHeader[T <: TileLinkChannel](in: DecoupledIO[LogicalNetworkIO[T]]): Bool =
-    connectDataBeatCounter(in.fire(), in.bits.payload, UInt(0))._2
-
-  /** If the network might interleave beats from different messages, we need a Vec of counters,
-    * one for every outstanding message id that might be interleaved.
-    *
-    * @param getId mapping from Message to counter id
-    */
-  def connectIncomingDataBeatCountersWithHeader[T <: TileLinkChannel with HasClientTransactionId](
-      in: DecoupledIO[LogicalNetworkIO[T]],
-      entries: Int,
-      getId: LogicalNetworkIO[T] => UInt): Vec[Bool] = {
-    Vec((0 until entries).map { i =>
-      connectDataBeatCounter(in.fire() && getId(in.bits) === UInt(i), in.bits.payload, UInt(0))._2 
-    })
-  }
-
-  /** Provides counters on two channels, as well a meta-counter that tracks how many
-    * messages have been sent over the up channel but not yet responded to over the down channel
-    *
-    * @param max max number of outstanding ups with no down
-    * @param up outgoing channel
-    * @param down incoming channel
-    * @param beat overrides cnts on single-beat messages
-    * @param track whether up's message should be tracked
-    * @return a tuple containing whether their are outstanding messages, up's count,
-    *         up's done, down's count, down's done
-    */
-  def connectTwoWayBeatCounter[T <: TileLinkChannel, S <: TileLinkChannel](
-      max: Int,
-      up: DecoupledIO[T],
-      down: DecoupledIO[S],
-      beat: UInt = UInt(0),
-      track: T => Bool = (t: T) => Bool(true)): (Bool, UInt, Bool, UInt, Bool) = {
-    val cnt = Reg(init = UInt(0, width = log2Up(max+1)))
-    val (up_idx, up_done) = connectDataBeatCounter(up.fire(), up.bits, beat)
-    val (down_idx, down_done) = connectDataBeatCounter(down.fire(), down.bits, beat)
-    val do_inc = up_done && track(up.bits)
-    val do_dec = down_done
-    cnt := Mux(do_dec,
-            Mux(do_inc, cnt, cnt - UInt(1)),
-            Mux(do_inc, cnt + UInt(1), cnt))
-    (cnt > UInt(0), up_idx, up_done, down_idx, down_done)
-  }
-}
-
 /** A super channel message container that can contain all kind of channels
   * Potential useful in a crossbar shared by all channels
   */
-class SuperChannel extends TileLinkChannel
+class SuperChannel(implicit p: Parameters) extends TileLinkChannel()(p)
     with HasCacheBlockAddress
     with HasTileLinkData
     with HasClientTransactionId
@@ -1287,7 +1209,7 @@ object SuperChannel {
   def finishType  = UInt("b100")
 
   // Acquire => SuperChannel
-  def apply(acq: Acquire): SuperChannel = {
+  def apply(acq: Acquire)(implicit p: Parameters): SuperChannel = {
     val msg = Wire(new SuperChannel)
     msg.ctype := acquireType
     msg.flag := acq.is_builtin_type
@@ -1302,7 +1224,7 @@ object SuperChannel {
   }
 
   // Probe => SuperChannel
-  def apply(prb: Probe): SuperChannel = {
+  def apply(prb: Probe)(implicit p: Parameters): SuperChannel = {
     val msg = Wire(new SuperChannel)
     msg.ctype := probeType
     msg.mtype := prb.p_type
@@ -1312,7 +1234,7 @@ object SuperChannel {
   }
 
   // Release => SuperChannel
-  def apply(rel: Release): SuperChannel = {
+  def apply(rel: Release)(implicit p: Parameters): SuperChannel = {
     val msg = Wire(new SuperChannel)
     msg.ctype := releaseType
     msg.mtype := rel.r_type
@@ -1326,7 +1248,7 @@ object SuperChannel {
   }
 
   // Grant => SuperChannel
-  def apply(gnt: Grant): SuperChannel = {
+  def apply(gnt: Grant)(implicit p: Parameters): SuperChannel = {
     val msg = Wire(new SuperChannel)
     msg.ctype := grantType
     msg.flag := gnt.is_builtin_type
@@ -1340,7 +1262,7 @@ object SuperChannel {
   }
 
   // Finish => SuperChannel
-  def apply(fin: Finish): SuperChannel = {
+  def apply(fin: Finish)(implicit p: Parameters): SuperChannel = {
     val msg = Wire(new SuperChannel)
     msg.ctype := finishType
     msg.manager_xact_id := fin.manager_xact_id
@@ -1353,8 +1275,8 @@ object SuperChannel {
 /** Super channel multiplexer to arbitrate all channels to
   * the shared super channel according to the defined priorities.
   */
-class SuperChannelInputMultiplexer
-    extends TLModule
+class SuperChannelInputMultiplexer(implicit p: Parameters)
+    extends TLModule()(p)
 {
   val io = new Bundle {
     val tl = new TileLinkIO().flip
@@ -1384,8 +1306,8 @@ class SuperChannelInputMultiplexer
 
 }
 
-class SuperChannelOutputMultiplexer
-    extends TLModule
+class SuperChannelOutputMultiplexer(implicit p: Parameters)
+    extends TLModule()(p)
 {
   val io = new Bundle {
     val tl = new TileLinkIO
@@ -1411,8 +1333,8 @@ class SuperChannelOutputMultiplexer
 /** Super channel demultiplexer to route super channel to corresponding
   * TileLink channels.
   */
-class SuperChannelInputDemultiplexer
-    extends TLModule
+class SuperChannelInputDemultiplexer(implicit p: Parameters)
+    extends TLModule()(p)
 {
   val io = new Bundle {
     val tl = new TileLinkIO().flip
@@ -1440,8 +1362,8 @@ class SuperChannelInputDemultiplexer
   }
 }
 
-class SuperChannelOutputDemultiplexer
-    extends TLModule
+class SuperChannelOutputDemultiplexer(implicit p: Parameters)
+    extends TLModule()(p)
 {
   val io = new Bundle {
     val tl = new TileLinkIO
@@ -1476,10 +1398,10 @@ class SuperChannelOutputDemultiplexer
   }
 }
 
-class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NASTIParameters {
+class NASTIMasterIOTileLinkIOConverterHandler(id: Int)(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters {
   val io = new Bundle {
     val tl = new ManagerTileLinkIO
-    val nasti = new NASTIMasterIO
+    val nasti = new NastiIO
     val rdy = Bool(OUTPUT)
     val tl_acq_match = Bool(OUTPUT)
     val tl_rel_match = Bool(OUTPUT)
@@ -1499,7 +1421,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
 
   // liminations:
   val dataBits = tlDataBits*tlDataBeats 
-  val dstIdBits = params(LNHeaderBits)
+  val dstIdBits = p(LNHeaderBits)
   require(tlDataBits == nastiXDataBits, "Data sizes between LLC and MC don't agree") // TODO: remove this restriction
   require(tlDataBeats < (1 << nastiXLenBits), "Can't have that many beats")
   require(dstIdBits + tlClientXactIdBits < nastiXIdBits, "NASTIIO converter is going truncate tags: " + dstIdBits + " + " + tlClientXactIdBits + " >= " + nastiXIdBits)
@@ -1645,10 +1567,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
       data = io.nasti.r.bits.data))
 }
 
-class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
+class NastiMasterIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters {
   val io = new Bundle {
     val tl = new ManagerTileLinkIO
-    val nasti = new NASTIMasterIO
+    val nasti = new NastiIO
   }
 
   io.tl.probe.valid := Bool(false)
@@ -1699,7 +1621,7 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   doInternalOutputArbitration(io.nasti.ar, handlerList.map(_.io.nasti.ar))
 
   // NASTI.w does not allow interleaving
-  def w_multibeat(w: NASTIWriteDataChannel): Bool = !w.last
+  def w_multibeat(w: NastiWriteDataChannel): Bool = !w.last
   doInternalOutputArbitration(io.nasti.w, handlerList.map(_.io.nasti.w), tlDataBeats, w_multibeat _)
 
   doInternalOutputArbitration(io.nasti.aw, handlerList.map(_.io.nasti.aw))
@@ -1713,10 +1635,10 @@ class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
   io.nasti.r.ready := naRMatches.orR && na_r_rdy(naRHandlerId)
 }
 
-class NASTILiteMasterIOTileLinkIOConverter extends TLModule with NASTIParameters with TileLinkParameters {
+class NastiLiteMasterIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters with HasTileLinkParameters {
   val io = new Bundle {
     val tl = new ManagerTileLinkIO
-    val nasti = new NASTILiteMasterIO
+    val nasti = new NastiIO
   }
 
   // need careful revision if need to support 64-bit NASTI-Lite interface

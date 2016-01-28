@@ -3,33 +3,35 @@
 package uncore
 import Chisel._
 import junctions._
+import cde.{Parameters, Field}
 
-abstract trait IOSpaceParameters extends UsesParameters {
-  val xLen = params(XLen)
-  val pALen = params(PAddrBits)
-  val nIOSections = params(NIOSections)
+abstract trait IOSpaceParameters {
+  implicit val p: Parameters
+  val xLen = p(XLen)
+  val pALen = p(PAddrBits)
+  val nIOSections = p(NIOSections)
   require(xLen >= pALen) // TODO: support pALen > xLen
 }
 
-class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
+class IOSpaceConsts(ch: Int)(implicit val p: Parameters) extends Module with IOSpaceParameters {
   val io = new Bundle {
     val update = new ValidIO(new PCRUpdate).flip
-    val paddr = Vec(UInt(INPUT, pALen), ch)  // physical address for IO check
-    val isIO = Vec(Bool(OUTPUT), ch)         // indicate an IO address
+    val paddr = Vec(ch, UInt(INPUT, pALen))  // physical address for IO check
+    val isIO = Vec(ch, Bool(OUTPUT))         // indicate an IO address
   }
 
   // map registers
   // effecting pack
-  val base = Reg(Vec(UInt(width=xLen), nIOSections))
-  val mask = Reg(Vec(UInt(width=xLen), nIOSections))
+  val base = Reg(Vec(nIOSections, UInt(width=xLen)))
+  val mask = Reg(Vec(nIOSections, UInt(width=xLen)))
 
   // update pack, enforced after a write to io_map_update
-  val base_update = Reg(Vec(UInt(width=xLen), nIOSections))
-  val mask_update = Reg(Vec(UInt(width=xLen), nIOSections))
+  val base_update = Reg(Vec(nIOSections, UInt(width=xLen)))
+  val mask_update = Reg(Vec(nIOSections, UInt(width=xLen)))
 
   when(this.reset) {
-    base_update(0) := UInt(params(InitIOBase))
-    mask_update(0) := UInt(params(InitIOMask))
+    base_update(0) := UInt(p(InitIOBase))
+    mask_update(0) := UInt(p(InitIOMask))
 
     // disable other IO sections
     if(nIOSections > 1) {
@@ -64,7 +66,7 @@ class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
 
   // checking logic
   for(c <- 0 until ch) {
-    val check = Wire(Vec(Bool(), nIOSections))
+    val check = Wire(Vec(nIOSections, Bool()))
     for(i <- 0 until nIOSections) {
       check(i) := (io.paddr(c) & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
     }

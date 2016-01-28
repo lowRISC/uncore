@@ -5,7 +5,32 @@ package uncore
 import Chisel._
 import uncore._
 import uncore.constants._
+import cde.{Parameters, Field}
 
+case object XLen extends Field[Int]
+case object NIOSections extends Field[Int]
+case object IODataBits extends Field[UInt]
+case object NMemSections extends Field[Int]
+case object InitIOBase extends Field[String]
+case object InitIOMask extends Field[String]
+case object InitMemBase extends Field[String]
+case object InitMemMask extends Field[String]
+case object InitPhyBase extends Field[String]
+
+object CSR
+{
+  // commands
+  val SZ = 3
+  val X = BitPat.DC(SZ)
+  val N = UInt(0,SZ)
+  val W = UInt(1,SZ)
+  val S = UInt(2,SZ)
+  val C = UInt(3,SZ)
+  val I = UInt(4,SZ)
+  val R = UInt(5,SZ)
+
+  val ADDRSZ = 12
+}
 
 object PCRs {
   val ptime     = 0x701
@@ -20,72 +45,73 @@ object PCRs {
 }
 
 
-abstract trait PCRParameters extends UsesParameters {
-  val xLen = params(XLen)
-  val nCores = params(NTiles)
-  val coreIdBits = log2Up(params(NTiles))
-  val nMemSections = params(NMemSections)
-  val nIOSections = params(NIOSections)
+abstract trait PCRParameters {
+  implicit val p: Parameters
+  val xLen = p(XLen)
+  val nCores = p(NTiles)
+  val coreIdBits = log2Up(p(NTiles))
+  val nMemSections = p(NMemSections)
+  val nIOSections = p(NIOSections)
   val addrBits = 12
 }
 
-abstract class PCRBundle extends Bundle with PCRParameters
-abstract class PCRModule extends Module with PCRParameters
+abstract class PCRBundle(implicit val p: Parameters) extends Bundle with PCRParameters
+abstract class PCRModule(implicit val p: Parameters) extends Module with PCRParameters
 
-class PCRReq extends PCRBundle {
+class PCRReq(implicit p: Parameters) extends PCRBundle()(p) {
   val coreId = UInt(width = coreIdBits)
   val addr = UInt(width = addrBits)
   val cmd = UInt(width = CSR.SZ)
   val data = Bits(width = xLen)
 }
 
-class PCRResp extends PCRBundle {
+class PCRResp(implicit p: Parameters) extends PCRBundle()(p) {
   val coreId = UInt(width = coreIdBits)
   val data = Bits(width = xLen)
 }
 
-class PCRUpdate extends PCRBundle {
+class PCRUpdate(implicit p: Parameters) extends PCRBundle()(p) {
   val broadcast = Bool()
   val coreId = UInt(width = coreIdBits)
   val addr = UInt(width = addrBits)
   val data = Bits(width = xLen)
 }
 
-class PCRIO extends PCRBundle {
+class PCRIO(implicit p: Parameters) extends PCRBundle()(p) {
   val req = new DecoupledIO(new PCRReq)
   val resp = new ValidIO(new PCRResp).flip
   val update = new ValidIO(new PCRUpdate).flip
 }
 
-class PCRControl extends PCRModule {
+class PCRControl(implicit p: Parameters) extends PCRModule()(p) {
   val io = new Bundle {
-    val pcr_req = Vec(new DecoupledIO(new PCRReq), nCores).flip
+    val pcr_req = Vec(nCores, new DecoupledIO(new PCRReq)).flip
     val pcr_resp = new ValidIO(new PCRResp)
     val pcr_update = new ValidIO(new PCRUpdate)
     val soft_reset = Bool(OUTPUT)
-    val host = new HostIO
+    val host = new HIFIO
     val interrupt = UInt(INPUT, xLen)
-    val irq = Vec(Bool(OUTPUT), nCores)
+    val irq = Vec(nCores, Bool(OUTPUT))
   }
 
   // global registers
   val reg_time = Reg(UInt(width=xLen))
-  val reg_mem_map_core_base = Reg(Vec(UInt(width=xLen), nMemSections))
-  val reg_mem_map_mask = Reg(Vec(UInt(width=xLen), nMemSections))
-  val reg_mem_map_phy_base = Reg(Vec(UInt(width=xLen), nMemSections))
-  val reg_io_map_base = Reg(Vec(UInt(width=xLen), nIOSections))
-  val reg_io_map_mask = Reg(Vec(UInt(width=xLen), nIOSections))
+  val reg_mem_map_core_base = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val reg_mem_map_mask = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val reg_mem_map_phy_base = Reg(Vec(nMemSections, UInt(width=xLen)))
+  val reg_io_map_base = Reg(Vec(nIOSections, UInt(width=xLen)))
+  val reg_io_map_mask = Reg(Vec(nIOSections, UInt(width=xLen)))
   val reg_tohost = Reg(init = UInt(0,xLen))
   val reg_tohost_coreId = Reg(UInt(width=coreIdBits))
-  val reg_int_en = Reg(Vec(UInt(0,xLen), nCores))
+  val reg_int_en = Reg(Vec(nCores, UInt(0,xLen)))
   val reg_int_pending = Reg(init = UInt(0,xLen))
 
   when(this.reset) {
-    reg_mem_map_core_base(0) := UInt(params(InitMemBase))
-    reg_mem_map_mask(0) := UInt(params(InitMemMask))
-    reg_mem_map_phy_base(0) := UInt(params(InitPhyBase))
-    reg_io_map_base(0) := UInt(params(InitIOBase))
-    reg_io_map_mask(0) := UInt(params(InitIOMask))
+    reg_mem_map_core_base(0) := UInt(p(InitMemBase))
+    reg_mem_map_mask(0) := UInt(p(InitMemMask))
+    reg_mem_map_phy_base(0) := UInt(p(InitPhyBase))
+    reg_io_map_base(0) := UInt(p(InitIOBase))
+    reg_io_map_mask(0) := UInt(p(InitIOMask))
 
     // disable other Memory sections
     if(nMemSections > 1) {
@@ -107,7 +133,7 @@ class PCRControl extends PCRModule {
   req_arb.io.in <> io.pcr_req
   req_arb.io.out.ready :=
      reg_tohost === UInt(0) ||
-     req_arb.io.out.bits.addr != UInt(PCRs.ptohost) && req_arb.io.out.valid
+     req_arb.io.out.bits.addr =/= UInt(PCRs.ptohost) && req_arb.io.out.valid
 
   // addr decoding
   val read_mapping = collection.mutable.LinkedHashMap[Int,Bits](
@@ -144,7 +170,7 @@ class PCRControl extends PCRModule {
   io.pcr_resp.bits.coreId := req_arb.io.out.bits.coreId
   io.pcr_resp.bits.data := Mux1H(for ((k, v) <- read_mapping) yield decoded_addr(k) -> v)
 
-  val wen = req_arb.io.out.fire() && req_arb.io.out.bits.cmd != CSR.R
+  val wen = req_arb.io.out.fire() && req_arb.io.out.bits.cmd =/= CSR.R
   val wdata =
     Mux(req_arb.io.out.bits.cmd === CSR.C, io.pcr_resp.bits.data & ~req_arb.io.out.bits.data,
     Mux(req_arb.io.out.bits.cmd === CSR.S, io.pcr_resp.bits.data | req_arb.io.out.bits.data,
@@ -186,7 +212,7 @@ class PCRControl extends PCRModule {
     reg_tohost_coreId := req_arb.io.out.bits.coreId
   }
 
-  io.host.req.valid := reg_tohost != UInt(0)
+  io.host.req.valid := reg_tohost =/= UInt(0)
   io.host.req.bits.id := reg_tohost_coreId
   io.host.req.bits.data := reg_tohost
 
@@ -253,7 +279,7 @@ class PCRControl extends PCRModule {
       reg_int_en(i) := wdata
     }
 
-    io.irq(i) := (reg_int_pending & reg_int_en(i)) != UInt(0)
+    io.irq(i) := (reg_int_pending & reg_int_en(i)) =/= UInt(0)
   }
 
   val int_mask = reg_int_en.reduce(_|_)
