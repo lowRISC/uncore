@@ -25,6 +25,8 @@ class HIFMsg(implicit p: Parameters) extends HIFBundle()(p)
 {
   val id = UInt(width = log2Up(nCores))
   val data = UInt(width = xLen)
+
+  override def cloneType = new HIFMsg()(p).asInstanceOf[this.type]
 }
 
 class HIFIO(implicit p: Parameters) extends HIFBundle()(p)
