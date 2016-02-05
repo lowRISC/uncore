@@ -126,3 +126,62 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
   }
 
 }
+
+class SharedBuffer[T <: Data](gen: T, n: Int, size: Int, widths: List[Int]) extends Module {
+  val width = widths.max
+  val io = new Bundle {
+    val in = Vec(n, Decoupled(Vec(width, UInt(width=8)))).flip
+    val out = Vec(n, Decoupled(Vec(width, UInt(width=8))))
+    val reset_in = Bool(INPUT) // reset write pointer for partial write
+    val reset_out = Bool(INPUT) // reset read pointer for partial read
+  }
+
+  widths.foreach(w => require(size % w == 0))
+
+  val pointerWidth = log2Up(size)
+  val wp = Reg(init = UInt(0, width=pointerWidth))
+  val rp = Reg(init = UInt(0, width=pointerWidth))
+  val filled = Reg(init = Bool(false))
+  val buf = Reg(Vec(size, UInt(width=8)))
+
+  in.zip(widths).map { (ip, w)  => {
+    when(ip.fire()) {
+      when(Cat(UInt(0), wp) + UInt(w) >= UInt(size)) {
+        filled := Bool(true)
+        wp := UInt(0)
+        buf(UInt(size-1), wp) := ip.bits
+      }.otherwise{
+        wp := wp + UInt(w)
+        buf(wp+UInt(w-1), wp) := ip.bits
+      }
+    }
+    ip.ready := !filled
+  }}
+
+  out.zip(widths).map{ (op, w) => {
+    when(op.fire()) {
+      when(Cat(UInt(0), rp) + UInt(w) >= UInt(size)) {
+        filled := Bool(false)
+        rp := UInt(0)
+      }.otherwise{
+        rp := rp + UInt(w)
+      }
+    }
+    op.bits := Mux(
+      Cat(UInt(0), rp) + UInt(w) >= UInt(size),
+      buf(UInt(size-1), rp),
+      buf(rp+UInt(w-1), rp))
+    op.valid := filled || rp + UInt(w) <= wp
+  }}
+
+  when(reset_in) {
+    filled := Bool(true)
+    wp := UInt(0)
+  }
+
+  when(reset_out) {
+    filled := Bool(false)
+    rp := UInt(0)
+  }
+
+}
