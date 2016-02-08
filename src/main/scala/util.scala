@@ -127,61 +127,29 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
 
 }
 
-class SharedBuffer[T <: Data](gen: T, n: Int, size: Int, widths: List[Int]) extends Module {
-  val width = widths.max
-  val io = new Bundle {
-    val in = Vec(n, Decoupled(Vec(width, UInt(width=8)))).flip
-    val out = Vec(n, Decoupled(Vec(width, UInt(width=8))))
-    val reset_in = Bool(INPUT) // reset write pointer for partial write
-    val reset_out = Bool(INPUT) // reset read pointer for partial read
-  }
-
-  widths.foreach(w => require(size % w == 0))
-
+class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Module {
   val pointerWidth = log2Up(size)
-  val wp = Reg(init = UInt(0, width=pointerWidth))
-  val rp = Reg(init = UInt(0, width=pointerWidth))
-  val filled = Reg(init = Bool(false))
-  val buf = Reg(Vec(size, UInt(width=8)))
-
-  in.zip(widths).map { (ip, w)  => {
-    when(ip.fire()) {
-      when(Cat(UInt(0), wp) + UInt(w) >= UInt(size)) {
-        filled := Bool(true)
-        wp := UInt(0)
-        buf(UInt(size-1), wp) := ip.bits
-      }.otherwise{
-        wp := wp + UInt(w)
-        buf(wp+UInt(w-1), wp) := ip.bits
-      }
-    }
-    ip.ready := !filled
-  }}
-
-  out.zip(widths).map{ (op, w) => {
-    when(op.fire()) {
-      when(Cat(UInt(0), rp) + UInt(w) >= UInt(size)) {
-        filled := Bool(false)
-        rp := UInt(0)
-      }.otherwise{
-        rp := rp + UInt(w)
-      }
-    }
-    op.bits := Mux(
-      Cat(UInt(0), rp) + UInt(w) >= UInt(size),
-      buf(UInt(size-1), rp),
-      buf(rp+UInt(w-1), rp))
-    op.valid := filled || rp + UInt(w) <= wp
-  }}
-
-  when(reset_in) {
-    filled := Bool(true)
-    wp := UInt(0)
+  val io = new Bundle {
+    val in = Decoupled(Vec(ipw, gen)).flip
+    val in_size = UInt(INPUT, width=pointerWidth)
+    val out = Decoupled(Vec(opw, gen))
+    val out_size = UInt(INPUT, width=pointerWidth)
+    val count = UInt(OUTPUT, width=pointerWidth+1)
   }
 
-  when(reset_out) {
-    filled := Bool(false)
-    rp := UInt(0)
+  val wp = Reg(init = UInt(0, width=pointerWidth+1))
+  val buf = Reg(Vec(size, gen))
+
+  when(in.fire()) {
+    wp := wp + io.in_size
+    buf(wp+io.in_size-UInt(1), wp) := in.bits
+    when(out.fire()) {
+      buf := buf >> io.out_size
+      wp := wp - io.out_size
+    }
   }
 
+  io.in.ready := wp + in_size <= UInt(size)
+  io.out.valid := wp > out_size
+  io.count := wp
 }
