@@ -103,6 +103,22 @@ class TileLinkIOMamIOConverter extends TLModule
     data_buffer.io.out.ready := io.mam.rdata.ready
     data_buffer.io.out_size := UInt(mamByteWidth)
 
+    // send out acquire
+    val tl_acq_sent = Reg(init=Bool(false))
+    when(!tl_acq_sent) {
+      io.tl.acquire.valid := Bool(true)
+      io.tl.acquire.bits :=
+        Mux(reqSerDes.io.tl_block,
+          GetBlock(UInt(0),
+            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits)
+          ),
+          Get(UInt(0),
+            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
+            reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits)
+          ))
+      tl_acq_sent := io.tl.acquire.ready
+    }
+
     val tl_gnt_finished = Reg(init=Bool(false))
     when((!reqSerDes.io.tl_block || tl_finish) && io.tl.grant.fire()) {
       tl_gnt_finished := Bool(true)
@@ -111,6 +127,7 @@ class TileLinkIOMamIOConverter extends TLModule
     when(data_buffer.io.count === UInt(mamByteWidth) && io.mam.rdata.fire()) {
       reqSerDes.io.tl_ready := Bool(true)
       tl_gnt_finished := Bool(false)
+      tl_acq_sent := Bool(false)
     }
   }
 }

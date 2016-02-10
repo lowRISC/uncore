@@ -124,7 +124,6 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
   } .elsewhen(io.po.fire()) {
     valid := Bool(false)
   }
-
 }
 
 class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Module {
