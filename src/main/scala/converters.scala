@@ -25,25 +25,74 @@ class TileLinkIOMamIOConverter extends TLModule
   val buffer_size = params(CacheBlockBytes) + buffer_width
 
   val reqSerDes = Module(new MamReqSerDes)
-  reqSerDes.io.mam <> io.mam.req
+  reqSerDes.io.mam.req <> io.mam.req
+  reqSerDes.io.tl_ready := Bool(false)
 
   val data_buffer =
     Module(new SerDesBuffer(UInt(width=8), buffer_size, buffer_width, buffer_width))
   val mask_buffer =
     Module(new SerDesBuffer(Bool(), buffer_size, buffer_width, buffer_width))
 
+  for(i <- 0 until buffer_width) {
+    data_buffer.io.in.bits(i) := UInt(0)
+    mask_buffer.io.in.bits(i) := Bool(false)
+  }
+  data_buffer.io.in.valid := Bool(false)
+  data_buffer.io.out.ready := Bool(false)
+  data_buffer.io.in_size := UInt(buffer_width)
+  data_buffer.io.out_size := UInt(buffer_width)
+  mask_buffer.io.in.valid := Bool(false)
+  mask_buffer.io.out.ready := Bool(false)
+  mask_buffer.io.in_size := UInt(buffer_width)
+  mask_buffer.io.out_size := UInt(buffer_width)
+
   // assigning tl and mam signals
   io.tl.acquire.valid := Bool(false)
-  io.tl.acquire.bits := Get(UInt(0), UInt(0), UInt(0))
   io.tl.grant.ready := !reqSerDes.io.tl_rw
   io.mam.wdata.ready := reqSerDes.io.tl_rw
   io.mam.rdata.valid := Bool(false)
-  io.mam.rdata.bits := UInt(0)
+  io.mam.rdata.bits.data := UInt(0)
 
   val tl_burst_beat_fire = reqSerDes.io.tl_block &&
     Mux(reqSerDes.io.tl_rw, io.tl.acquire.fire(), io.tl.grant.fire())
 
   val (tl_cnt, tl_finish) = Counter(tl_burst_beat_fire, tlDataBeats)
+
+  val write_block =
+    PutBlock(
+      client_xact_id = UInt(0),
+      addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
+      addr_beat = tl_cnt << tlByteAddrBits,
+      data = data_buffer.io.out.bits.toBits,
+      wmask = mask_buffer.io.out.bits.toBits
+    )
+
+  val write_beat =
+    Put(
+      client_xact_id = UInt(0),
+      addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
+      addr_beat = reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits),
+      data = data_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3)),
+      wmask = mask_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3))
+    )
+
+  val read_block =
+    GetBlock(
+      client_xact_id = UInt(0),
+      addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits)
+    )
+
+  val read_beat =
+    Get(
+      client_xact_id = UInt(0),
+      addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
+      addr_beat = reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits)
+    )
+
+  io.tl.acquire.bits :=
+    Mux(reqSerDes.io.tl_rw,
+      Mux(reqSerDes.io.tl_block, write_block, write_beat),
+      Mux(reqSerDes.io.tl_block, read_block, read_beat))
 
   when(reqSerDes.io.tl_valid && reqSerDes.io.tl_rw) { // write
     // MAM.wdata is connected to buffer inputs
@@ -61,20 +110,6 @@ class TileLinkIOMamIOConverter extends TLModule
     when(tl_cnt === UInt(0) && data_buffer.io.count >= reqSerDes.io.tl_count ||
          tl_cnt =/= UInt(0) && data_buffer.io.count >= UInt(tlDataBeats)) {
       io.tl.acquire.valid := Bool(true)
-      io.tl.acquire.bits :=
-        Mux(reqSerDes.io.tl_block,
-          PutBlock(UInt(0),
-            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
-            tl_cnt << tlByteAddrBits,
-            data_buffer.io.out.bits.toBits,
-            mask_buffer.io.out.bits.toBits
-          ),
-          Put(UInt(0),
-            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
-            reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits),
-            data_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3)),
-            mask_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3))
-          ))
     }
     data_buffer.io.out.ready := io.tl.acquire.ready
     mask_buffer.io.out.ready := io.tl.acquire.ready
@@ -99,7 +134,7 @@ class TileLinkIOMamIOConverter extends TLModule
 
     // MAM.rdata is connected to buffer outputs
     io.mam.rdata.valid := data_buffer.io.out.valid
-    io.mam.rdata.bits := data_buffer.io.out.bits
+    io.mam.rdata.bits.data := data_buffer.io.out.bits.toBits
     data_buffer.io.out.ready := io.mam.rdata.ready
     data_buffer.io.out_size := UInt(mamByteWidth)
 
@@ -107,15 +142,6 @@ class TileLinkIOMamIOConverter extends TLModule
     val tl_acq_sent = Reg(init=Bool(false))
     when(!tl_acq_sent) {
       io.tl.acquire.valid := Bool(true)
-      io.tl.acquire.bits :=
-        Mux(reqSerDes.io.tl_block,
-          GetBlock(UInt(0),
-            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits)
-          ),
-          Get(UInt(0),
-            reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
-            reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits)
-          ))
       tl_acq_sent := io.tl.acquire.ready
     }
 
