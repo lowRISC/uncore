@@ -63,11 +63,13 @@ class PCRReq(implicit p: Parameters) extends PCRBundle()(p) {
   val addr = UInt(width = addrBits)
   val cmd = UInt(width = CSR.SZ)
   val data = Bits(width = xLen)
+  override def cloneType = new PCRReq()(p).asInstanceOf[this.type]
 }
 
 class PCRResp(implicit p: Parameters) extends PCRBundle()(p) {
   val coreId = UInt(width = coreIdBits)
   val data = Bits(width = xLen)
+  override def cloneType = new PCRResp()(p).asInstanceOf[this.type]
 }
 
 class PCRUpdate(implicit p: Parameters) extends PCRBundle()(p) {
@@ -75,6 +77,7 @@ class PCRUpdate(implicit p: Parameters) extends PCRBundle()(p) {
   val coreId = UInt(width = coreIdBits)
   val addr = UInt(width = addrBits)
   val data = Bits(width = xLen)
+  override def cloneType = new PCRUpdate()(p).asInstanceOf[this.type]
 }
 
 class PCRIO(implicit p: Parameters) extends PCRBundle()(p) {

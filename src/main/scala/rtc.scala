@@ -9,8 +9,8 @@ case object RTCPeriod extends Field[Int]
 class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule {
   val io = new NastiIO
 
-  val addrMap = new AddrHashMap(p(GlobalAddrMap))
-  val addrTable = Vec.tabulate(nCores) { i =>
+  lazy val addrMap = new AddrHashMap(p(GlobalAddrMap))
+  lazy val addrTable = Vec.tabulate(nCores) { i =>
     UInt(addrMap(s"conf:csr$i").start + csr_MTIME * scrDataBytes)
   }
 
