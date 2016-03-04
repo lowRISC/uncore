@@ -138,25 +138,35 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
 
   val wp = Reg(init = UInt(0, width=pointerWidth+1))
   val buffer = Reg(Vec(size, gen))
+  val wp_r = Wire(UInt(width=pointerWidth+1))
+  val wp_w = Wire(UInt(width=pointerWidth+1))
+  val buffer_r = Wire(Vec(size, gen))
+  val buffer_w = Wire(Vec(size, gen))
 
-  when(io.in.fire()) {
-    wp := wp + io.in_size
-    for(i <- 0 until ipw) {
-      val m_wp = wp + UInt(i)
-      when(m_wp < UInt(size)) {
-        buffer(m_wp) := io.in.bits(i)
+  wp_r := wp
+  buffer_r := buffer
+  when(io.out.fire()) {
+    wp_r := wp - io.out_size
+    for(i <- 0 until size) {
+      val index = io.out_size + UInt(i)
+      when(index < UInt(size)) {
+        buffer_r(i) := buffer(index)
       }
-    }
-    when(io.out.fire()) {
-      for(i <- 0 until ipw) {
-        val m_rp = io.out_size + UInt(i)
-        when(m_rp < UInt(size)) {
-          buffer(i) := buffer(m_rp)
-        }
-      }
-      wp := wp - io.out_size
     }
   }
+
+  wp_w := wp_r
+  buffer_w := buffer_r
+  when(io.in.fire()) {
+    wp_w := wp_r + io.in_size
+    for(i <- 0 until ipw) {
+      val index = wp_r + UInt(i)
+      buffer_w(index) := io.in.bits(i)
+    }
+  }
+
+  wp := wp_w
+  buffer := buffer_w
 
   io.in.ready := wp + io.in_size <= UInt(size)
   io.out.valid := wp > io.out_size
