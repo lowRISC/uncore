@@ -130,9 +130,9 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
   val pointerWidth = log2Up(size)
   val io = new Bundle {
     val in = Decoupled(Vec(ipw, gen)).flip
-    val in_size = UInt(INPUT, width=pointerWidth)
+    val in_size = UInt(INPUT, width=log2Up(ipw))
     val out = Decoupled(Vec(opw, gen))
-    val out_size = UInt(INPUT, width=pointerWidth)
+    val out_size = UInt(INPUT, width=log2Up(opw))
     val count = UInt(OUTPUT, width=pointerWidth+1)
   }
 
@@ -143,32 +143,35 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
   val buffer_r = Wire(Vec(size, gen))
   val buffer_w = Wire(Vec(size, gen))
 
-  wp_r := wp
-  buffer_r := buffer
-  when(io.out.fire()) {
-    wp_r := wp - io.out_size
-    for(i <- 0 until size) {
-      val index = io.out_size + UInt(i)
+  wp_w := wp
+  buffer_w := buffer
+  when(io.in.fire()) {
+    wp_w := wp + io.in_size
+    for(i <- 0 until ipw) {
+      val index = wp + UInt(i)
       when(index < UInt(size)) {
-        buffer_r(i) := buffer(index)
+        buffer_w(index) := io.in.bits(i)
       }
     }
   }
 
-  wp_w := wp_r
-  buffer_w := buffer_r
-  when(io.in.fire()) {
-    wp_w := wp_r + io.in_size
-    for(i <- 0 until ipw) {
-      val index = wp_r + UInt(i)
-      buffer_w(index) := io.in.bits(i)
+  wp_r := wp_w
+  buffer_r := buffer_w
+  when(io.out.fire()) {
+    wp_r := wp_w - io.out_size
+    for(i <- 0 until size) {
+      val index = io.out_size + UInt(i)
+      when(index < UInt(size)) {
+        buffer_r(i) := buffer_w(index)
+      }
     }
   }
 
-  wp := wp_w
-  buffer := buffer_w
+  wp := wp_r
+  buffer := buffer_r
 
-  io.in.ready := wp + io.in_size <= UInt(size)
-  io.out.valid := wp > io.out_size
+  io.in.ready := wp + io.in_size < UInt(size)
+  io.out.valid := wp >= io.out_size
   io.count := wp
+  for(i <- 0 until opw) io.out.bits(i) := buffer(i)
 }

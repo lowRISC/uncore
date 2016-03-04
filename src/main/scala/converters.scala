@@ -99,11 +99,11 @@ class TileLinkIOMamIOConverter extends TLModule
     data_buffer.io.in.valid := io.mam.wdata.valid
     mask_buffer.io.in.valid := io.mam.wdata.valid
     data_buffer.io.in.bits := io.mam.wdata.bits.data
-    data_buffer.io.in_size := UInt(buffer_width)
+    data_buffer.io.in_size := UInt(mamByteWidth)
     mask_buffer.io.in.bits := Mux(reqSerDes.io.mam_burst,
                                   SInt(-1, width=buffer_width).toUInt,
                                   io.mam.wdata.bits.strb)
-    mask_buffer.io.in_size := UInt(buffer_width)
+    mask_buffer.io.in_size := UInt(mamByteWidth)
     io.mam.wdata.ready := data_buffer.io.in.ready
 
     // tl.acquire is connected to buffer outputs
@@ -113,10 +113,8 @@ class TileLinkIOMamIOConverter extends TLModule
     }
     data_buffer.io.out.ready := io.tl.acquire.ready
     mask_buffer.io.out.ready := io.tl.acquire.ready
-    data_buffer.io.out_size :=
-      Mux(reqSerDes.io.tl_block, UInt(tlDataBeats), reqSerDes.io.tl_count)
-    mask_buffer.io.out_size :=
-      Mux(reqSerDes.io.tl_block, UInt(tlDataBeats), reqSerDes.io.tl_count)
+    data_buffer.io.out_size := reqSerDes.io.tl_count
+    mask_buffer.io.out_size := reqSerDes.io.tl_count
     
     reqSerDes.io.tl_ready :=
       Mux(reqSerDes.io.tl_block,
@@ -129,7 +127,7 @@ class TileLinkIOMamIOConverter extends TLModule
     data_buffer.io.in.valid := io.tl.grant.valid
     data_buffer.io.in.bits :=
       io.tl.grant.bits.data >> (reqSerDes.io.tl_shift << UInt(3))
-    data_buffer.io.in_size := UInt(tlDataBytes) - reqSerDes.io.tl_shift
+    data_buffer.io.in_size := reqSerDes.io.tl_count
     io.tl.grant.ready := data_buffer.io.in.ready
 
     // MAM.rdata is connected to buffer outputs
@@ -145,14 +143,12 @@ class TileLinkIOMamIOConverter extends TLModule
       tl_acq_sent := io.tl.acquire.ready
     }
 
-    val tl_gnt_finished = Reg(init=Bool(false))
-    when((!reqSerDes.io.tl_block || tl_finish) && io.tl.grant.fire()) {
-      tl_gnt_finished := Bool(true)
-    }
+    reqSerDes.io.tl_ready :=
+      Mux(reqSerDes.io.tl_block,
+        io.tl.grant.fire() && tl_finish,
+        io.tl.grant.fire())
 
-    when(data_buffer.io.count === UInt(mamByteWidth) && io.mam.rdata.fire()) {
-      reqSerDes.io.tl_ready := Bool(true)
-      tl_gnt_finished := Bool(false)
+    when(reqSerDes.io.tl_ready) {
       tl_acq_sent := Bool(false)
     }
   }
@@ -183,31 +179,28 @@ class MamReqSerDes extends TLModule
   }
 
   val req = Reg(new MamReq)
-  val req_size = Reg(init=UInt(0,width = mamBurstByteSizeWidth))
+  val byte_cnt = Reg(init=UInt(0,width = mamBurstByteSizeWidth))
   val req_valid = Reg(init=Bool(false))
 
-  io.mam.req.ready := !req_valid
+  io.mam.req.ready := byte_cnt === UInt(0)
 
   when(io.mam.req.fire()) {
-    req_valid := Bool(true)
     req := io.mam.req.bits
-    req_size := io.mam.req.bits.size * UInt(mamByteWidth)
+    byte_cnt := io.mam.req.bits.size * UInt(mamByteWidth)
   }
 
   when(io.tl_valid && io.tl_ready) {
-    req_size := req_size - io.tl_count
-    when (req_size <= UInt(tlDataBytes) || req_size === UInt(cacheBytes)) {
-      req_valid := Bool(false)
-    }
+    byte_cnt := byte_cnt - io.tl_count
   }
 
   io.tl_rw := req.rw
-  io.tl_block := req.size >= UInt(cacheBytes) && req.addr(tlBlockAddrBits-1,0) === UInt(0)
+  io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBlockAddrBits-1,0) === UInt(0)
   io.tl_addr := Cat(req.addr >> tlByteAddrBits, UInt(0, width=tlByteAddrBits))
   io.tl_shift := req.addr(tlByteAddrBits-1,0)
   io.tl_count := Mux(io.tl_block, UInt(cacheBytes), // a whole cache line
-                 Mux(io.tl_shift === UInt(0), UInt(tlDataBytes), // a beat
-                     UInt(tlDataBytes) - io.tl_shift))           // less than a beat
-  io.tl_valid := req_size > UInt(0)
+                 Mux(io.tl_shift =/= UInt(0), UInt(tlDataBytes) - io.tl_shift, // first partial beat
+                 Mux(byte_cnt >= UInt(tlDataBytes), UInt(tlDataBytes), // a beat
+                     byte_cnt)))                    // less than a beat
+  io.tl_valid := byte_cnt =/= UInt(0)
   io.mam_burst := req.burst
 }
