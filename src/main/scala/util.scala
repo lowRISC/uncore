@@ -127,19 +127,19 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
 }
 
 class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Module {
-  val pointerWidth = log2Up(size)
+  val pointerWidth = log2Up(size) + 1
   val io = new Bundle {
     val in = Decoupled(Vec(ipw, gen)).flip
-    val in_size = UInt(INPUT, width=log2Up(ipw))
+    val in_size = UInt(INPUT, width=log2Up(ipw+1))
     val out = Decoupled(Vec(opw, gen))
-    val out_size = UInt(INPUT, width=log2Up(opw))
-    val count = UInt(OUTPUT, width=pointerWidth+1)
+    val out_size = UInt(INPUT, width=log2Up(opw+1))
+    val count = UInt(OUTPUT, width=pointerWidth)
   }
 
-  val wp = Reg(init = UInt(0, width=pointerWidth+1))
+  val wp = Reg(init = UInt(0, width=pointerWidth))
   val buffer = Reg(Vec(size, gen))
-  val wp_r = Wire(UInt(width=pointerWidth+1))
-  val wp_w = Wire(UInt(width=pointerWidth+1))
+  val wp_r = Wire(UInt(width=pointerWidth))
+  val wp_w = Wire(UInt(width=pointerWidth))
   val buffer_r = Wire(Vec(size, gen))
   val buffer_w = Wire(Vec(size, gen))
 
@@ -148,10 +148,7 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
   when(io.in.fire()) {
     wp_w := wp + io.in_size
     for(i <- 0 until ipw) {
-      val index = wp + UInt(i)
-      when(index < UInt(size)) {
-        buffer_w(index) := io.in.bits(i)
-      }
+      buffer_w(wp + UInt(i)) := io.in.bits(i)
     }
   }
 
@@ -161,16 +158,14 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
     wp_r := wp_w - io.out_size
     for(i <- 0 until size) {
       val index = io.out_size + UInt(i)
-      when(index < UInt(size)) {
-        buffer_r(i) := buffer_w(index)
-      }
+      buffer_r(i) := Mux(index < UInt(size), buffer_w(index), buffer_w(i))
     }
   }
 
   wp := wp_r
   buffer := buffer_r
 
-  io.in.ready := wp + io.in_size < UInt(size)
+  io.in.ready := wp + UInt(ipw) <= UInt(size)
   io.out.valid := wp >= io.out_size
   io.count := wp
   for(i <- 0 until opw) io.out.bits(i) := buffer(i)
