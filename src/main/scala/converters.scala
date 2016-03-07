@@ -41,7 +41,7 @@ class TileLinkIOMamIOConverter extends TLModule
 
   val tl_data_buffer =
     Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamByteWidth))
-  tl_data_buffer.io.in.valid := io.tl.grant.valid
+  tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
   tl_data_buffer.io.in_size := reqSerDes.io.tl_count
   tl_data_buffer.io.out_size := UInt(mamByteWidth)
@@ -88,17 +88,24 @@ class TileLinkIOMamIOConverter extends TLModule
       Mux(reqSerDes.io.tl_block, write_block, write_beat),
       Mux(reqSerDes.io.tl_block, read_block, read_beat))
 
+  val tl_acq_sent = Reg(init=Bool(false))
+
   when(reqSerDes.io.tl_valid && reqSerDes.io.tl_rw) { // write
     // tl.acquire is connected to buffer outputs
     when(tl_cnt === UInt(0) && mam_data_buffer.io.count >= reqSerDes.io.tl_count ||
          tl_cnt =/= UInt(0) && mam_data_buffer.io.count >= UInt(tlDataBeats)) {
-      io.tl.acquire.valid := Bool(true)
+      io.tl.acquire.valid := !tl_acq_sent
     }
     
-    reqSerDes.io.tl_ready :=
-      Mux(reqSerDes.io.tl_block,
-        io.tl.acquire.fire() && tl_finish,
-        io.tl.acquire.fire())
+    when(io.tl.acquire.fire()) {
+      tl_acq_sent := !reqSerDes.io.tl_block || tl_finish
+    }
+
+    reqSerDes.io.tl_ready := io.tl.grant.valid
+
+    when(io.tl.grant.valid) {
+      tl_acq_sent := Bool(false)
+    }
   }
   mam_data_buffer.io.in.bits := io.mam.wdata.bits.data
   mam_mask_buffer.io.in.bits := Mux(reqSerDes.io.mam_burst,
@@ -108,7 +115,6 @@ class TileLinkIOMamIOConverter extends TLModule
 
   when(reqSerDes.io.tl_valid && !reqSerDes.io.tl_rw) { // read
     // send out acquire
-    val tl_acq_sent = Reg(init=Bool(false))
     when(!tl_acq_sent) {
       io.tl.acquire.valid := Bool(true)
       tl_acq_sent := io.tl.acquire.ready
@@ -125,7 +131,7 @@ class TileLinkIOMamIOConverter extends TLModule
   }
   tl_data_buffer.io.in.bits :=
     io.tl.grant.bits.data >> (reqSerDes.io.tl_shift << UInt(3))
-  io.tl.grant.ready := tl_data_buffer.io.in.ready
+  io.tl.grant.ready := Mux(reqSerDes.io.tl_rw, tl_acq_sent, tl_data_buffer.io.in.ready)
   io.mam.rdata.valid := tl_data_buffer.io.out.valid
   io.mam.rdata.bits.data := tl_data_buffer.io.out.bits.toBits
 
