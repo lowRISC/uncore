@@ -66,7 +66,8 @@ class IOSpaceConsts(ch: Int) extends Module with IOSpaceParameters {
   for(c <- 0 until ch) {
     val check = Wire(Vec(Bool(), nIOSections))
     for(i <- 0 until nIOSections) {
-      check(i) := (io.paddr(c) & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
+      check(i) := mask(i) =/= UInt(0) &&
+                  (io.paddr(c) & ~ mask(i)(pALen,0)) === base(i)(pALen,0)
     }
     io.isIO(c) := check.reduce(_||_)
   }

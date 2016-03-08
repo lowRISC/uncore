@@ -37,7 +37,6 @@ class MemSpaceConsts(ch: Int) extends Module with MemSpaceParameters {
     // disable other IO sections
     if(nMemSections > 1) {
       for(i <- 1 until nMemSections) {
-        cbase_update(i) := UInt(0)
         mask_update(i) := UInt(0)
       }
     }
@@ -75,7 +74,8 @@ class MemSpaceConsts(ch: Int) extends Module with MemSpaceParameters {
     val addr_vec = Wire(Vec(UInt(width=pALen), nMemSections))
     for(i <- 0 until nMemSections) {
       addr_vec(i) :=
-      Mux((io.core_addr(c) & ~ mask(i)(pALen,0)) === cbase(i)(pALen,0),
+      Mux(mask(i) =/= UInt(0) &&
+          (io.core_addr(c) & ~ mask(i)(pALen,0)) === cbase(i)(pALen,0),
           io.core_addr(c) & mask(i) | pbase(i),
           UInt(0)
       )
