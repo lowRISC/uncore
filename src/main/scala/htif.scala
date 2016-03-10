@@ -4,39 +4,9 @@ package uncore
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import scala.math.max
 import junctions._
 import junctions.NastiConstants._
 import cde.{Parameters, Field}
-
-case object NTiles extends Field[Int]
-
-abstract trait HIFParameters {
-  implicit val p: Parameters
-  val nCores = p(NTiles)
-  val nHosts = 1
-  val nIDBits = max(nCores, nHosts)
-  val xLen = p(XLen)
-}
-
-abstract class HIFBundle(implicit val p: Parameters) extends Bundle with HIFParameters
-abstract class HIFModule(implicit val p: Parameters) extends Module with HIFParameters
-
-class HIFMsg(implicit p: Parameters) extends HIFBundle()(p)
-{
-  val id = UInt(width = log2Up(nCores))
-  val data = UInt(width = xLen)
-
-  override def cloneType = new HIFMsg()(p).asInstanceOf[this.type]
-}
-
-class HIFIO(implicit p: Parameters) extends HIFBundle()(p)
-{
-  val req = Decoupled(new HIFMsg)
-  val resp = Decoupled(new HIFMsg).flip
-}
-
-// Berkeley's HTIF
 
 case object HtifKey extends Field[HtifParameters]
 
