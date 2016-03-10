@@ -973,7 +973,7 @@ trait TileLinkArbiterLike extends HasTileLinkParameters {
       clts: Seq[DecoupledIO[LogicalNetworkIO[M]]],
       mngr: DecoupledIO[LogicalNetworkIO[M]]) {
     def hasData(m: LogicalNetworkIO[M]) = m.payload.hasMultibeatData()
-    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _), true))
+    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
     clts.zipWithIndex.zip(arb.io.in).map{ case ((req, id), arb) => {
       arb.valid := req.valid
       arb.bits := req.bits
@@ -987,7 +987,7 @@ trait TileLinkArbiterLike extends HasTileLinkParameters {
       clts: Seq[DecoupledIO[M]],
       mngr: DecoupledIO[M]) {
     def hasData(m: M) = m.hasMultibeatData()
-    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _), true))
+    val arb = Module(new LockingRRArbiter(mngr.bits, arbN, tlDataBeats, Some(hasData _)))
     clts.zipWithIndex.zip(arb.io.in).map{ case ((req, id), arb) => {
       arb.valid := req.valid
       arb.bits := req.bits
@@ -1048,7 +1048,7 @@ trait TileLinkArbiterLike extends HasTileLinkParameters {
   }
 
   def hookupFinish[M <: LogicalNetworkIO[Finish]]( clts: Seq[DecoupledIO[M]], mngr: DecoupledIO[M]) {
-    val arb = Module(new RRArbiter(mngr.bits, arbN, true))
+    val arb = Module(new RRArbiter(mngr.bits, arbN))
     arb.io.in <> clts
     mngr <> arb.io.out
   }

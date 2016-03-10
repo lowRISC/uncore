@@ -6,12 +6,12 @@ import cde.{Parameters, Field}
 
 case object RTCPeriod extends Field[Int]
 
-class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule {
+class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule
+    with HasAddrMapParameters {
   val io = new NastiIO
 
-  lazy val addrMap = new AddrHashMap(p(GlobalAddrMap))
-  lazy val addrTable = Vec.tabulate(nCores) { i =>
-    UInt(addrMap(s"conf:csr$i").start + csr_MTIME * scrDataBytes)
+  val addrTable = Vec.tabulate(nCores) { i =>
+    UInt(addrMap(s"conf:csr$i").start + csr_MTIME * csrDataBytes)
   }
 
   val rtc = Reg(init=UInt(0, scrDataBits))
@@ -50,7 +50,7 @@ class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule {
   io.aw.bits := NastiWriteAddressChannel(
     id = coreId,
     addr = addrTable(coreId),
-    size = UInt(log2Up(scrDataBytes)))
+    size = UInt(log2Up(csrDataBytes)))
 
   io.w.valid := sending_data
   io.w.bits := NastiWriteDataChannel(data = rtc)
@@ -60,5 +60,8 @@ class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule {
   io.r.ready := Bool(false)
 
   assert(!rtc_tick || send_acked.reduce(_ && _),
-    s"Not all clocks were updated for rtc tick")
+    "Not all clocks were updated for rtc tick")
+
+  assert(!io.b.valid || io.b.bits.resp === UInt(0),
+    "RTC received NASTI error response")
 }

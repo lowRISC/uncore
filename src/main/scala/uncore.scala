@@ -32,6 +32,7 @@ trait HasCoherenceAgentParameters {
   val innerWriteMaskBits = innerTLParams.writeMaskBits
   val innerBeatAddrBits = log2Up(innerDataBeats)
   val innerByteAddrBits = log2Up(innerDataBits/8)
+  val maxManagerXacts = innerTLParams.maxManagerXacts
   require(outerDataBeats == innerDataBeats) //TODO: fix all xact_data Vecs to remove this requirement
 }
 
@@ -63,7 +64,6 @@ trait HasCoherenceAgentWiringHelpers {
 trait HasInnerTLIO extends HasCoherenceAgentParameters {
   val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => p(InnerTLId)}))
   val incoherent = Vec(inner.tlNCachingClients, Bool()).asInput
-  val soft_reset = Bool(INPUT)
   def iacq(dummy: Int = 0) = inner.acquire.bits
   def iprb(dummy: Int = 0) = inner.probe.bits
   def irel(dummy: Int = 0) = inner.release.bits
@@ -117,7 +117,6 @@ abstract class HierarchicalCoherenceAgent(implicit p: Parameters) extends Cohere
 trait HasTrackerConflictIO extends Bundle {
   val has_acquire_conflict = Bool(OUTPUT)
   val has_acquire_match = Bool(OUTPUT)
-  val has_release_match = Bool(OUTPUT)
 }
 
 class ManagerXactTrackerIO(implicit p: Parameters) extends ManagerTLIO()(p)
@@ -154,4 +153,17 @@ abstract class XactTracker(implicit p: Parameters) extends CoherenceAgentModule(
 
   def dropPendingBitAtDest(in: DecoupledIO[ProbeToDst]): UInt =
     ~Fill(in.bits.tlNCachingClients, in.fire()) | ~UIntToOH(in.bits.client_id)
+
+  def pinAllReadyValidLow[T <: Data](b: Bundle) {
+    b.elements.foreach {
+      _._2 match {
+        case d: DecoupledIO[_] =>
+          if(d.ready.dir == OUTPUT) d.ready := Bool(false)
+          else if(d.valid.dir == OUTPUT) d.valid := Bool(false)
+        case v: ValidIO[_] => if(v.valid.dir == OUTPUT) v.valid := Bool(false) 
+        case b: Bundle => pinAllReadyValidLow(b)
+        case _ =>
+      }
+    }
+  }
 }

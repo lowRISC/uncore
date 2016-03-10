@@ -48,18 +48,3 @@ trait MemoryOpConstants {
   def isWrite(cmd: UInt) = cmd === M_XWR || cmd === M_XSC || isAMO(cmd)
   def isWriteIntent(cmd: UInt) = isWrite(cmd) || cmd === M_PFW || cmd === M_XLR
 }
-
-object CSR
-{
-  // commands
-  val SZ = 3
-  val X = BitPat.DC(SZ)
-  val N = UInt(0,SZ)
-  val W = UInt(1,SZ)
-  val S = UInt(2,SZ)
-  val C = UInt(3,SZ)
-  val I = UInt(4,SZ)
-  val R = UInt(5,SZ)
-
-  val ADDRSZ = 12
-}
