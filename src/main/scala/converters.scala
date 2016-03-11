@@ -27,6 +27,7 @@ class TileLinkIOMamIOConverter extends TLModule
 
   val mam_data_buffer =
     Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, mamBytes, tlDataBytes))
+  val mam_data_buffer_in_data = Wire(Vec(mamBytes, UInt(width=8)))
   mam_data_buffer.io.in.valid := io.mam.wdata.valid
   mam_data_buffer.io.out.ready := io.tl.acquire.ready
   mam_data_buffer.io.in_size := UInt(mamBytes)
@@ -34,6 +35,7 @@ class TileLinkIOMamIOConverter extends TLModule
 
   val mam_mask_buffer =
     Module(new SerDesBuffer(Bool(), cacheBlockBytes, mamBytes, tlDataBytes))
+  val mam_mask_buffer_in_data = Wire(Vec(mamBytes, Bool()))
   mam_mask_buffer.io.in.valid := io.mam.wdata.valid
   mam_mask_buffer.io.out.ready := io.tl.acquire.ready
   mam_mask_buffer.io.in_size := UInt(mamBytes)
@@ -41,6 +43,7 @@ class TileLinkIOMamIOConverter extends TLModule
 
   val tl_data_buffer =
     Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamBytes))
+  val tl_data_buffer_in_data = Wire(Vec(tlDataBytes, UInt(width=8)))
   tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
   tl_data_buffer.io.in_size := reqSerDes.io.tl_count
@@ -107,10 +110,11 @@ class TileLinkIOMamIOConverter extends TLModule
       tl_acq_sent := Bool(false)
     }
   }
-  mam_data_buffer.io.in.bits := io.mam.wdata.bits.data
-  mam_mask_buffer.io.in.bits := Mux(reqSerDes.io.mam_burst,
+  mam_data_buffer.io.in.bits := mam_data_buffer_in_data.fromBits(io.mam.wdata.bits.data)
+  mam_mask_buffer.io.in.bits := mam_mask_buffer_in_data.fromBits(
+                                Mux(reqSerDes.io.mam_burst,
                                     SInt(-1, width=mamBytes).toUInt,
-                                    io.mam.wdata.bits.strb)
+                                    io.mam.wdata.bits.strb))
   io.mam.wdata.ready := mam_data_buffer.io.in.ready
 
   when(reqSerDes.io.tl_valid && !reqSerDes.io.tl_rw) { // read
@@ -129,8 +133,8 @@ class TileLinkIOMamIOConverter extends TLModule
       tl_acq_sent := Bool(false)
     }
   }
-  tl_data_buffer.io.in.bits :=
-    io.tl.grant.bits.data >> (reqSerDes.io.tl_shift << UInt(3))
+  tl_data_buffer.io.in.bits := tl_data_buffer_in_data.fromBits(
+    io.tl.grant.bits.data >> (reqSerDes.io.tl_shift << UInt(3)))
   io.tl.grant.ready := Mux(reqSerDes.io.tl_rw, tl_acq_sent, tl_data_buffer.io.in.ready)
   io.mam.rdata.valid := tl_data_buffer.io.out.valid
   io.mam.rdata.bits.data := tl_data_buffer.io.out.bits.toBits
@@ -174,6 +178,7 @@ class MamReqSerDes extends TLModule
 
   when(io.tl_valid && io.tl_ready) {
     byte_cnt := byte_cnt - io.tl_count
+    req.addr := req.addr + io.tl_count
   }
 
   io.tl_rw := req.rw
