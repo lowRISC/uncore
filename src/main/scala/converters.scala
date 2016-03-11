@@ -18,7 +18,7 @@ class TileLinkIOMamIOConverter extends TLModule
     val tl = new ClientUncachedTileLinkIO
   }
 
-  require(mamAddrWidth >= params(PAddrBits))
+  require(mamAddrBits >= params(PAddrBits))
   val cacheBlockBytes = params(CacheBlockBytes)
 
   val reqSerDes = Module(new MamReqSerDes)
@@ -26,25 +26,25 @@ class TileLinkIOMamIOConverter extends TLModule
   reqSerDes.io.tl_ready := Bool(false)
 
   val mam_data_buffer =
-    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, mamByteWidth, tlDataBytes))
+    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, mamBytes, tlDataBytes))
   mam_data_buffer.io.in.valid := io.mam.wdata.valid
   mam_data_buffer.io.out.ready := io.tl.acquire.ready
-  mam_data_buffer.io.in_size := UInt(mamByteWidth)
+  mam_data_buffer.io.in_size := UInt(mamBytes)
   mam_data_buffer.io.out_size := reqSerDes.io.tl_count
 
   val mam_mask_buffer =
-    Module(new SerDesBuffer(Bool(), cacheBlockBytes, mamByteWidth, tlDataBytes))
+    Module(new SerDesBuffer(Bool(), cacheBlockBytes, mamBytes, tlDataBytes))
   mam_mask_buffer.io.in.valid := io.mam.wdata.valid
   mam_mask_buffer.io.out.ready := io.tl.acquire.ready
-  mam_mask_buffer.io.in_size := UInt(mamByteWidth)
+  mam_mask_buffer.io.in_size := UInt(mamBytes)
   mam_mask_buffer.io.out_size := reqSerDes.io.tl_count
 
   val tl_data_buffer =
-    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamByteWidth))
+    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamBytes))
   tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
   tl_data_buffer.io.in_size := reqSerDes.io.tl_count
-  tl_data_buffer.io.out_size := UInt(mamByteWidth)
+  tl_data_buffer.io.out_size := UInt(mamBytes)
 
   val tl_burst_beat_fire = reqSerDes.io.tl_block &&
     Mux(reqSerDes.io.tl_rw, io.tl.acquire.fire(), io.tl.grant.fire())
@@ -109,7 +109,7 @@ class TileLinkIOMamIOConverter extends TLModule
   }
   mam_data_buffer.io.in.bits := io.mam.wdata.bits.data
   mam_mask_buffer.io.in.bits := Mux(reqSerDes.io.mam_burst,
-                                    SInt(-1, width=mamByteWidth).toUInt,
+                                    SInt(-1, width=mamBytes).toUInt,
                                     io.mam.wdata.bits.strb)
   io.mam.wdata.ready := mam_data_buffer.io.in.ready
 
@@ -162,14 +162,14 @@ class MamReqSerDes extends TLModule
   }
 
   val req = Reg(new MamReq)
-  val byte_cnt = Reg(init=UInt(0,width = mamBurstByteSizeWidth))
+  val byte_cnt = Reg(init=UInt(0,width = mamBytesBits))
   val req_valid = Reg(init=Bool(false))
 
   io.mam.req.ready := byte_cnt === UInt(0)
 
   when(io.mam.req.fire()) {
     req := io.mam.req.bits
-    byte_cnt := io.mam.req.bits.size * UInt(mamByteWidth)
+    byte_cnt := io.mam.req.bits.beats * UInt(mamBytes)
   }
 
   when(io.tl_valid && io.tl_ready) {
