@@ -126,7 +126,7 @@ class DecoupledPipe[T <: Data] (gen: T) extends Module {
   }
 }
 
-class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Module {
+class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int, rstVal: T) extends Module {
   val pointerWidth = log2Up(size) + 1
   val io = new Bundle {
     val in = Decoupled(Vec(ipw, gen)).flip
@@ -137,7 +137,7 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
   }
 
   val wp = Reg(init = UInt(0, width=pointerWidth))
-  val buffer = Reg(Vec(size, gen))
+  val buffer = Reg(init = Vec.fill(size)(rstVal))
   val wp_r = Wire(UInt(width=pointerWidth))
   val wp_w = Wire(UInt(width=pointerWidth))
   val buffer_r = Wire(Vec(size, gen))
@@ -158,7 +158,7 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
     wp_r := wp_w - io.out_size
     for(i <- 0 until size) {
       val index = io.out_size + UInt(i)
-      buffer_r(i) := Mux(index < UInt(size), buffer_w(index), buffer_w(i))
+      buffer_r(i) := Mux(index < UInt(size), buffer_w(index), rstVal)
     }
   }
 
@@ -166,7 +166,7 @@ class SerDesBuffer[T <: Data](gen: T, size: Int, ipw: Int, opw: Int) extends Mod
   buffer := buffer_r
 
   io.in.ready := wp + UInt(ipw) <= UInt(size)
-  io.out.valid := wp >= io.out_size
+  io.out.valid := io.out_size =/= UInt(0) && wp >= io.out_size
   io.count := wp
   for(i <- 0 until opw) io.out.bits(i) := buffer(i)
 }

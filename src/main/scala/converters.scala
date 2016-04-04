@@ -26,7 +26,7 @@ class TileLinkIOMamIOConverter extends TLModule
   reqSerDes.io.tl_ready := Bool(false)
 
   val mam_data_buffer =
-    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, mamBytes, tlDataBytes))
+    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, mamBytes, tlDataBytes, UInt(0)))
   val mam_data_buffer_in_data = Wire(Vec(mamBytes, UInt(width=8)))
   mam_data_buffer.io.in.valid := io.mam.wdata.valid
   mam_data_buffer.io.out.ready := io.tl.acquire.ready
@@ -34,7 +34,7 @@ class TileLinkIOMamIOConverter extends TLModule
   mam_data_buffer.io.out_size := reqSerDes.io.tl_count
 
   val mam_mask_buffer =
-    Module(new SerDesBuffer(Bool(), cacheBlockBytes, mamBytes, tlDataBytes))
+    Module(new SerDesBuffer(Bool(), cacheBlockBytes, mamBytes, tlDataBytes, Bool(false)))
   val mam_mask_buffer_in_data = Wire(Vec(mamBytes, Bool()))
   mam_mask_buffer.io.in.valid := io.mam.wdata.valid
   mam_mask_buffer.io.out.ready := io.tl.acquire.ready
@@ -42,7 +42,7 @@ class TileLinkIOMamIOConverter extends TLModule
   mam_mask_buffer.io.out_size := reqSerDes.io.tl_count
 
   val tl_data_buffer =
-    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamBytes))
+    Module(new SerDesBuffer(UInt(width=8), cacheBlockBytes, tlDataBytes, mamBytes, UInt(0)))
   val tl_data_buffer_in_data = Wire(Vec(tlDataBytes, UInt(width=8)))
   tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
@@ -63,13 +63,14 @@ class TileLinkIOMamIOConverter extends TLModule
       wmask = mam_mask_buffer.io.out.bits.toBits
     )
 
+  val beat_wmask = mam_mask_buffer.io.out.bits.toBits << reqSerDes.io.tl_shift
   val write_beat =
     Put(
       client_xact_id = UInt(0),
       addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
       addr_beat = reqSerDes.io.tl_addr(tlBeatAddrBits + tlByteAddrBits - 1, tlByteAddrBits),
       data = mam_data_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3)),
-      wmask = mam_mask_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3))
+      wmask = beat_wmask // mam_mask_buffer.io.out.bits.toBits << (reqSerDes.io.tl_shift << UInt(3))
     )
 
   val read_block =
@@ -186,9 +187,8 @@ class MamReqSerDes extends TLModule
   io.tl_addr := Cat(req.addr >> tlByteAddrBits, UInt(0, width=tlByteAddrBits))
   io.tl_shift := req.addr(tlByteAddrBits-1,0)
   io.tl_count := Mux(io.tl_block, UInt(cacheBytes), // a whole cache line
-                 Mux(io.tl_shift =/= UInt(0), UInt(tlDataBytes) - io.tl_shift, // first partial beat
-                 Mux(byte_cnt >= UInt(tlDataBytes), UInt(tlDataBytes), // a beat
-                     byte_cnt)))                    // less than a beat
+                 Mux(byte_cnt +  io.tl_shift >= UInt(tlDataBytes), UInt(tlDataBytes) - io.tl_shift, // more than one beats
+                     byte_cnt))      // less than one beat
   io.tl_valid := byte_cnt =/= UInt(0)
   io.mam_burst := req.burst
 }
