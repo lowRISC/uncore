@@ -22,6 +22,7 @@ trait TileLinkParameters extends UsesParameters {
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
   val tlBlockAddrBits = params(TLBlockAddrBits)
   val tlDataBits = params(TLDataBits)
+  val tagTLDataBits = params(TagTLDataBits)
   val tlDataBytes = tlDataBits/8
   val tlDataBeats = params(TLDataBeats)
   val tlWriteMaskBits = params(TLWriteMaskBits)
@@ -86,7 +87,7 @@ trait HasManagerTransactionId extends TLBundle {
 
 /** A single beat of cache block data */
 trait HasTileLinkData extends HasTileLinkBeatId {
-  val data = UInt(width = tlDataBits)
+  val data = UInt(width = tagTLDataBits)
 
   def hasData(dummy: Int = 0): Bool
   def hasMultibeatData(dummy: Int = 0): Bool
@@ -1487,6 +1488,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
     val na_r_match = Bool(OUTPUT)
   }
 
+  // tag utilities
+  val xLen = params(XLen)
+  val tagUtil = new TagUtil(params(TagBits), xLen)
+
   private def opSizeToXSize(ops: UInt) = MuxLookup(ops, UInt("b111"), Seq(
     MT_B  -> UInt(0),
     MT_BU -> UInt(0),
@@ -1560,7 +1565,7 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   when(is_idle && io.tl.acquire.valid && !io.tl.release.valid) { // release take priority
     write_multiple_data := tl_acq.hasMultibeatData()
     read_multiple_data := !tl_acq.isBuiltInType() || tl_acq.isBuiltInType(Acquire.getBlockType)
-    is_read := tl_acq.isBuiltInType() || !tl_acq.hasData()
+    is_read := tl_acq.isBuiltInType() && !tl_acq.hasData() //was || which is wrong i believe
     is_write := tl_acq.isBuiltInType() && tl_acq.hasData()
     is_acq := Bool(true)
     is_builtin := tl_acq.isBuiltInType()
@@ -1607,7 +1612,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   // nasti.w
   io.nasti.w.valid := ((io.tl.acquire.valid && is_acq) || (io.tl.release.valid && !is_acq)) && is_write
   na_w.strb := Mux(is_acq && tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1, nastiWStrobeBits).toUInt)
-  na_w.data := Mux(is_acq, tl_acq.data, tl_rel.data)
+  val tl_acq_data_without_tag = tagUtil.removeTag(tl_acq.data)
+  val tl_rel_data_without_tag = tagUtil.removeTag(tl_rel.data)
+  na_w.data := Mux(is_acq, tl_acq_data_without_tag, tl_rel_data_without_tag)
+
   na_w.last := nw_finish || is_acq && !tl_acq.hasMultibeatData()
 
   // nasti.ar
@@ -1627,6 +1635,10 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
   io.tl.release.ready := !is_acq && io.nasti.w.fire()
 
   // tilelink grant
+
+  //Nasti data in bits
+  val nasti_with_tags = tagUtil.insertTag(io.nasti.r.bits.data)
+
   io.tl.grant.valid := Mux(is_write, io.nasti.b.valid, io.nasti.r.valid)
   tl_gnt := Mux(is_write,
     Grant(
@@ -1642,7 +1654,9 @@ class NASTIMasterIOTileLinkIOConverterHandler(id: Int) extends TLModule with NAS
       client_xact_id = tag_out(tlClientXactIdBits-1,0),
       manager_xact_id = UInt(id),
       addr_beat = nr_cnt,
-      data = io.nasti.r.bits.data))
+
+      data = nasti_with_tags.toUInt()
+    ))
 }
 
 class NASTIMasterIOTileLinkIOConverter extends TLModule with NASTIParameters {
