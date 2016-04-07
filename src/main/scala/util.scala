@@ -75,7 +75,7 @@ class FlowThroughSerializer[T <: Bundle with HasTileLinkData](gen: T, n: Int) ex
     val rbits = Reg{io.in.bits}
     val active = Reg(init=Bool(false))
 
-    val shifter = Vec(n, Bits(width = narrowWidth))
+    val shifter = Wire(Vec(n, Bits(width = narrowWidth)))
     (0 until n).foreach { 
       i => shifter(i) := rbits.data((i+1)*narrowWidth-1,i*narrowWidth)
     }
@@ -115,80 +115,5 @@ object FlowThroughSerializer {
     fs.io.in.bits := in.bits
     in.ready := fs.io.in.ready
     fs.io.out
-  }
-} 
-
-class DecoupledPipe[T <: Data] (gen: T) extends Module {
-  val io = new Bundle {
-    val pi = Decoupled(gen.clone).flip
-    val po = Decoupled(gen.clone)
-  }
-
-  val valid = Reg(init=Bool(false))
-  val bits = Reg(gen.clone)
-
-  io.pi.ready := !valid || io.po.ready
-  io.po.valid := valid
-  io.po.bits := bits
-
-  when(io.pi.fire()) {
-    valid := Bool(true)
-    bits := io.pi.bits
-  } .elsewhen(io.po.fire()) {
-    valid := Bool(false)
-  }
-}
-
-class ReorderQueueWrite[T <: Data](dType: T, tagWidth: Int) extends Bundle {
-  val data = dType.cloneType
-  val tag = UInt(width = tagWidth)
-
-  override def cloneType =
-    new ReorderQueueWrite(dType, tagWidth).asInstanceOf[this.type]
-}
-
-class ReorderQueue[T <: Data](dType: T, tagWidth: Int, size: Int)
-    extends Module {
-  val io = new Bundle {
-    val enq = Decoupled(new ReorderQueueWrite(dType, tagWidth)).flip
-    val deq = new Bundle {
-      val valid = Bool(INPUT)
-      val tag = UInt(INPUT, tagWidth)
-      val data = dType.cloneType.asOutput
-      val matches = Bool(OUTPUT)
-    }
-  }
-
-  val roq_data = Reg(Vec(size, dType.cloneType))
-  val roq_tags = Reg(Vec(size, UInt(width = tagWidth)))
-  val roq_free = Reg(init = Vec.fill(size)(Bool(true)))
-
-  val roq_enq_addr = PriorityEncoder(roq_free)
-  val roq_matches = roq_tags.zip(roq_free)
-    .map { case (tag, free) => tag === io.deq.tag && !free }
-  val roq_deq_addr = PriorityEncoder(roq_matches)
-
-  io.enq.ready := roq_free.reduce(_ || _)
-  io.deq.data := roq_data(roq_deq_addr)
-  io.deq.matches := roq_matches.reduce(_ || _)
-
-  when (io.enq.valid && io.enq.ready) {
-    roq_data(roq_enq_addr) := io.enq.bits.data
-    roq_tags(roq_enq_addr) := io.enq.bits.tag
-    roq_free(roq_enq_addr) := Bool(false)
-  }
-
-  when (io.deq.valid) {
-    roq_free(roq_deq_addr) := Bool(true)
-  }
-}
-
-object DecoupledHelper {
-  def apply(rvs: Bool*) = new DecoupledHelper(rvs)
-}
-
-class DecoupledHelper(val rvs: Seq[Bool]) {
-  def fire(exclude: Bool, includes: Bool*) = {
-    (rvs.filter(_ ne exclude) ++ includes).reduce(_ && _)
   }
 }

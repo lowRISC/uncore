@@ -77,12 +77,12 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2)(implicit p: Parameters) e
     }
     val q = Module(new FinishQueue(outstanding))
     q.io.enq.valid := io.grant.fire() && g.requiresAck() && (!g.hasMultibeatData() || done)
-    q.io.enq.bits.fin := g.makeFinish()
-    q.io.enq.bits.dst := io.grant.bits.header.src
+    q.io.enq.bits := g.makeFinish()
+    q.io.enq.bits.client_id := io.grant.bits.header.src
 
     io.finish.bits.header.src := UInt(srcId)
-    io.finish.bits.header.dst := q.io.deq.bits.dst
-    io.finish.bits.payload := q.io.deq.bits.fin
+    io.finish.bits.header.dst := q.io.deq.bits.client_id
+    io.finish.bits.payload := q.io.deq.bits
     io.finish.valid := q.io.deq.valid
     q.io.deq.ready := io.finish.ready
 
@@ -93,19 +93,15 @@ class FinishUnit(srcId: Int = 0, outstanding: Int = 2)(implicit p: Parameters) e
   }
 }
 
-class FinishQueueEntry(implicit p: Parameters) extends TLBundle()(p) {
-    val fin = new Finish
-    val dst = UInt(width = log2Up(p(LNEndpoints)))
-}
-
-class FinishQueue(entries: Int)(implicit p: Parameters) extends Queue(new FinishQueueEntry()(p), entries)
+class FinishQueue(entries: Int)(implicit p: Parameters) extends Queue(new FinishToDst()(p), entries)
 
 /** A port to convert [[uncore.ClientTileLinkIO]].flip into [[uncore.TileLinkIO]]
   *
   * Creates network headers for [[uncore.Acquire]] and [[uncore.Release]] messages,
   * calculating header.dst and filling in header.src.
   * Strips headers from [[uncore.Probe Probes]].
-  * Responds to [[uncore.Grant]] by automatically issuing [[uncore.Finish]] to the granting managers.
+  * Passes [[uncore.GrantFromSrc]] and accepts [[uncore.FinishFromDst]] in response,
+  * setting up the headers for each.
   *
   * @param clientId network port id of this agent
   * @param addrConvert how a physical address maps to a destination manager port id
@@ -117,24 +113,64 @@ class ClientTileLinkNetworkPort(clientId: Int, addrConvert: UInt => UInt)
     val network = new TileLinkIO
   }
 
+  val acq_with_header = ClientTileLinkHeaderCreator(io.client.acquire, clientId, addrConvert)
+  val rel_with_header = ClientTileLinkHeaderCreator(io.client.release, clientId, addrConvert)
+  val fin_with_header = ClientTileLinkHeaderCreator(io.client.finish, clientId)
+  val prb_without_header = DecoupledLogicalNetworkIOUnwrapper(io.network.probe)
+  val gnt_without_header = DecoupledLogicalNetworkIOUnwrapper(io.network.grant)
+
+  io.network.acquire <> acq_with_header
+  io.network.release <> rel_with_header
+  io.network.finish <> fin_with_header
+  io.client.probe <> prb_without_header
+  io.client.grant.bits.client_id := io.network.grant.bits.header.src
+  io.client.grant <> gnt_without_header
+}
+
+/** A port to convert [[uncore.ClientUncachedTileLinkIO]].flip into [[uncore.TileLinkIO]]
+  *
+  * Creates network headers for [[uncore.Acquire]] and [[uncore.Release]] messages,
+  * calculating header.dst and filling in header.src.
+  * Responds to [[uncore.Grant]] by automatically issuing [[uncore.Finish]] to the granting managers.
+  *
+  * @param clientId network port id of this agent
+  * @param addrConvert how a physical address maps to a destination manager port id
+  */
+class ClientUncachedTileLinkNetworkPort(clientId: Int, addrConvert: UInt => UInt)
+                               (implicit p: Parameters) extends TLModule()(p) {
+  val io = new Bundle {
+    val client = new ClientUncachedTileLinkIO().flip
+    val network = new TileLinkIO
+  }
+
   val finisher = Module(new FinishUnit(clientId))
   finisher.io.grant <> io.network.grant
   io.network.finish <> finisher.io.finish
 
   val acq_with_header = ClientTileLinkHeaderCreator(io.client.acquire, clientId, addrConvert)
-  val rel_with_header = ClientTileLinkHeaderCreator(io.client.release, clientId, addrConvert)
-  val prb_without_header = DecoupledLogicalNetworkIOUnwrapper(io.network.probe)
   val gnt_without_header = finisher.io.refill
 
   io.network.acquire.bits := acq_with_header.bits
   io.network.acquire.valid := acq_with_header.valid && finisher.io.ready
   acq_with_header.ready := io.network.acquire.ready && finisher.io.ready
-  io.network.release <> rel_with_header
-  io.client.probe <> prb_without_header
   io.client.grant <> gnt_without_header
+  io.network.probe.ready :=  Bool(false)
+  io.network.release.valid := Bool(false)
 }
 
 object ClientTileLinkHeaderCreator {
+  def apply[T <: ClientToManagerChannel with HasClientId](
+        in: DecoupledIO[T],
+        clientId: Int)
+      (implicit p: Parameters): DecoupledIO[LogicalNetworkIO[T]] = {
+    val out = Wire(new DecoupledIO(new LogicalNetworkIO(in.bits)))
+    out.bits.payload := in.bits
+    out.bits.header.src := UInt(clientId)
+    out.bits.header.dst := in.bits.client_id
+    out.valid := in.valid
+    in.ready := out.ready
+    out
+  }
   def apply[T <: ClientToManagerChannel with HasCacheBlockAddress](
         in: DecoupledIO[T],
         clientId: Int,
@@ -199,6 +235,7 @@ object ManagerTileLinkHeaderCreator {
   */
 trait HasDataBeatCounters {
   type HasBeat = TileLinkChannel with HasTileLinkBeatId
+  type HasId = TileLinkChannel with HasClientId
 
   /** Returns the current count on this channel and when a message is done
     * @param inc increment the counter (usually .valid or .fire())
@@ -259,11 +296,12 @@ trait HasDataBeatCounters {
       up: DecoupledIO[T],
       down: DecoupledIO[S],
       beat: UInt = UInt(0),
-      track: T => Bool = (t: T) => Bool(true)): (Bool, UInt, Bool, UInt, Bool) = {
+      trackUp: T => Bool = (t: T) => Bool(true),
+      trackDown: S => Bool = (s: S) => Bool(true)): (Bool, UInt, Bool, UInt, Bool) = {
     val (up_idx, up_done) = connectDataBeatCounter(up.fire(), up.bits, beat)
     val (down_idx, down_done) = connectDataBeatCounter(down.fire(), down.bits, beat)
-    val do_inc = up_done && track(up.bits)
-    val do_dec = down_done
+    val do_inc = up_done && trackUp(up.bits)
+    val do_dec = down_done && trackDown(down.bits)
     val cnt = TwoWayCounter(do_inc, do_dec, max)
     (cnt > UInt(0), up_idx, up_done, down_idx, down_done)
   }
@@ -274,12 +312,6 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
     val in = new ClientTileLinkIO().flip
     val out = new ClientUncachedTileLinkIO
   }
-
-  def needsRoqEnq(channel: HasTileLinkData): Bool =
-    !channel.hasMultibeatData() || channel.addr_beat === UInt(0)
-
-  def needsRoqDeq(channel: HasTileLinkData): Bool =
-    !channel.hasMultibeatData() || channel.addr_beat === UInt(tlDataBeats - 1)
 
   val acqArb = Module(new LockingRRArbiter(new Acquire, 2, tlDataBeats,
     Some((acq: Acquire) => acq.hasMultibeatData())))
@@ -294,8 +326,8 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
   val irel = io.in.release.bits
   val ognt = io.out.grant.bits
 
-  val acq_roq_enq = needsRoqEnq(iacq)
-  val rel_roq_enq = needsRoqEnq(irel)
+  val acq_roq_enq = iacq.first()
+  val rel_roq_enq = irel.first()
 
   val acq_roq_ready = !acq_roq_enq || acqRoq.io.enq.ready
   val rel_roq_ready = !rel_roq_enq || relRoq.io.enq.ready
@@ -342,10 +374,10 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
 
   io.out.acquire <> acqArb.io.out
 
-  acqRoq.io.deq.valid := io.out.grant.fire() && needsRoqDeq(ognt)
+  acqRoq.io.deq.valid := io.out.grant.fire() && ognt.last()
   acqRoq.io.deq.tag := ognt.client_xact_id
 
-  relRoq.io.deq.valid := io.out.grant.fire() && needsRoqDeq(ognt)
+  relRoq.io.deq.valid := io.out.grant.fire() && ognt.last()
   relRoq.io.deq.tag := ognt.client_xact_id
 
   val gnt_builtin = acqRoq.io.deq.data
@@ -888,9 +920,6 @@ class TileLinkIONarrower(innerTLId: String, outerTLId: String)
     val acq_addr_beat = Reg(iacq.addr_beat)
     val oacq_ctr = Counter(factor)
 
-    // this part of the address shifts from the inner byte address 
-    // to the outer beat address
-    val readshift = iacq.full_addr()(innerByteAddrBits - 1, outerByteAddrBits)
     val outer_beat_addr = iacq.full_addr()(outerBlockOffset - 1, outerByteAddrBits)
     val outer_byte_addr = iacq.full_addr()(outerByteAddrBits - 1, 0)
 
@@ -962,32 +991,15 @@ class TileLinkIONarrower(innerTLId: String, outerTLId: String)
 
     val sending_put = Reg(init = Bool(false))
 
-    val pass_valid = io.in.acquire.valid && !stretch && !smallget
-    val smallget_valid = smallget && io.in.acquire.valid
-
-    val smallget_roq = Module(new ReorderQueue(
-      readshift, outerIdBits, outerMaxClients))
-
-    val smallget_helper = DecoupledHelper(
-      smallget_valid,
-      smallget_roq.io.enq.ready,
-      io.out.acquire.ready)
-
-    smallget_roq.io.enq.valid := smallget_helper.fire(
-      smallget_roq.io.enq.ready, !sending_put)
-    smallget_roq.io.enq.bits.data := readshift
-    smallget_roq.io.enq.bits.tag := iacq.client_xact_id
+    val pass_valid = io.in.acquire.valid && !stretch
 
     io.out.acquire.bits := MuxBundle(Wire(io.out.acquire.bits, init=iacq), Seq(
       (sending_put, put_block_acquire),
       (shrink, get_block_acquire),
       (smallput, put_acquire),
       (smallget, get_acquire)))
-    io.out.acquire.valid := sending_put || pass_valid ||
-      smallget_helper.fire(io.out.acquire.ready)
-    io.in.acquire.ready := !sending_put && (stretch ||
-      (!smallget && io.out.acquire.ready) ||
-      smallget_helper.fire(smallget_valid))
+    io.out.acquire.valid := sending_put || pass_valid
+    io.in.acquire.ready := !sending_put && (stretch || io.out.acquire.ready)
 
     when (io.in.acquire.fire() && stretch) {
       acq_data_buffer := iacq.data
@@ -1022,11 +1034,9 @@ class TileLinkIONarrower(innerTLId: String, outerTLId: String)
       data = gnt_data_buffer.toBits)(innerConfig)
 
     val smallget_grant = ognt.g_type === Grant.getDataBeatType
-    val get_grant_shift = Cat(smallget_roq.io.deq.data,
-                              UInt(0, outerByteAddrBits + 3))
-
-    smallget_roq.io.deq.valid := io.out.grant.fire() && smallget_grant
-    smallget_roq.io.deq.tag := ognt.client_xact_id
+    val get_grant_align = io.out.grant.bits.addr_beat(
+      innerByteAddrBits - outerByteAddrBits - 1, 0)
+    val get_grant_shift = Cat(get_grant_align, UInt(0, outerByteAddrBits + 3))
 
     val get_grant = Grant(
       is_builtin_type = Bool(true),
@@ -1124,5 +1134,5 @@ class MMIOTileLinkManager(implicit p: Parameters)
   io.inner.grant.bits.client_id := gnt_xact.client_id
   io.inner.grant.bits.client_xact_id := gnt_xact.client_xact_id
   io.inner.grant.bits.manager_xact_id := io.ognt().client_xact_id
-  io.inner.finish.ready := xact_pending(io.inner.finish.bits.manager_xact_id)
+  io.inner.finish.ready := Bool(true)
 }

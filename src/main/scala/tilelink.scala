@@ -132,6 +132,8 @@ trait HasTileLinkData extends HasTileLinkBeatId {
 
   def hasData(dummy: Int = 0): Bool
   def hasMultibeatData(dummy: Int = 0): Bool
+  def first(dummy: Int = 0): Bool = Mux(hasMultibeatData(), addr_beat === UInt(0), Bool(true))
+  def last(dummy: Int = 0): Bool = Mux(hasMultibeatData(), addr_beat === UInt(tlDataBeats-1), Bool(true))
 }
 
 /** An entire cache block of data */
@@ -225,7 +227,11 @@ trait HasProbeType extends HasTileLinkParameters {
   def hasMultibeatData(dummy: Int = 0) = Bool(false)
 }
 
-trait HasReleaseType extends HasTileLinkParameters {
+trait MightBeVoluntary {
+  def isVoluntary(dummy: Int = 0): Bool
+}
+
+trait HasReleaseType extends HasTileLinkParameters with MightBeVoluntary {
   val voluntary = Bool()
   val r_type = UInt(width = tlCoh.releaseTypeWidth)
 
@@ -237,7 +243,7 @@ trait HasReleaseType extends HasTileLinkParameters {
   def requiresAck(dummy: Int = 0) = !Bool(tlNetworkPreservesPointToPointOrdering)
 }
 
-trait HasGrantType extends HasTileLinkParameters {
+trait HasGrantType extends HasTileLinkParameters with MightBeVoluntary {
   val is_builtin_type = Bool()
   val g_type = UInt(width = tlGrantTypeBits)
 
@@ -718,8 +724,8 @@ object Release {
         r_type: UInt,
         client_xact_id: UInt,
         addr_block: UInt,
-        addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0))
+        addr_beat: UInt,
+        data: UInt)
       (implicit p: Parameters): Release = {
     val rel = Wire(new Release)
     rel.r_type := r_type
@@ -728,6 +734,26 @@ object Release {
     rel.addr_beat := addr_beat
     rel.data := data
     rel.voluntary := voluntary
+    rel
+  }
+
+  def apply(
+        src: UInt,
+        voluntary: Bool,
+        r_type: UInt,
+        client_xact_id: UInt,
+        addr_block: UInt,
+        addr_beat: UInt = UInt(0),
+        data: UInt = UInt(0))
+      (implicit p: Parameters): ReleaseFromSrc = {
+    val rel = Wire(new ReleaseFromSrc)
+    rel.client_id := src
+    rel.voluntary := voluntary
+    rel.r_type := r_type
+    rel.client_xact_id := client_xact_id
+    rel.addr_block := addr_block
+    rel.addr_beat := addr_beat
+    rel.data := data
     rel
   }
 }
@@ -758,6 +784,17 @@ class Grant(implicit p: Parameters) extends GrantMetadata
 /** [[uncore.Grant]] with an extra field stating its destination */
 class GrantToDst(implicit p: Parameters) extends Grant
   with HasClientId
+
+/** [[uncore.Grant]] with an extra field stating its destination */
+class GrantFromSrc(implicit p: Parameters) extends Grant
+    with HasClientId {
+  override def makeFinish(dummy: Int = 0): FinishToDst = {
+    val f = Wire(new FinishToDst)
+    f.manager_xact_id := this.manager_xact_id
+    f.client_id := this.client_id
+    f
+  }
+}
 
 /** [[uncore.GrantMetadata]] with an extra field containing an entire cache block */
 class BufferedGrant(implicit p: Parameters) extends GrantMetadata
@@ -842,6 +879,10 @@ class Finish(implicit p: Parameters) extends ClientToManagerChannel()(p)
   def hasMultibeatData(dummy: Int = 0) = Bool(false)
 }
 
+/** [[uncore.Finish]] with an extra field stating its destination */
+class FinishToDst(implicit p: Parameters) extends Finish
+  with HasClientId
+
 /** Complete IO definition for incoherent TileLink, including networking headers */
 class UncachedTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
   val acquire   = new DecoupledIO(new LogicalNetworkIO(new Acquire))
@@ -875,9 +916,12 @@ class ClientUncachedTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
 /** This version of TileLinkIO does not contain network headers. 
   * It is intended for use within client agents.
   */
-class ClientTileLinkIO(implicit p: Parameters) extends ClientUncachedTileLinkIO()(p) {
+class ClientTileLinkIO(implicit p: Parameters) extends TLBundle()(p) {
+  val acquire   = new DecoupledIO(new Acquire)
   val probe     = new DecoupledIO(new Probe).flip
   val release   = new DecoupledIO(new Release)
+  val grant     = new DecoupledIO(new GrantFromSrc).flip
+  val finish    = new DecoupledIO(new FinishToDst)
 }
 
 /** This version of TileLinkIO does not contain network headers, but
@@ -1084,8 +1128,15 @@ abstract class TileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) exte
 trait AppendsArbiterId extends TileLinkArbiterLike {
   def clientSourcedClientXactId(in: ClientSourcedWithId, id: Int) =
     Cat(in.client_xact_id, UInt(id, log2Up(arbN)))
-  def managerSourcedClientXactId(in: ManagerSourcedWithId) = 
-    in.client_xact_id >> log2Up(arbN)
+  def managerSourcedClientXactId(in: ManagerSourcedWithId) = {
+    /* This shouldn't be necessary, but Chisel3 doesn't emit correct Verilog
+     * when right shifting by too many bits.  See
+     * https://github.com/ucb-bar/firrtl/issues/69 */
+    if (in.client_xact_id.getWidth > log2Up(arbN))
+      in.client_xact_id >> log2Up(arbN)
+    else
+      UInt(0)
+  }
   def arbIdx(in: ManagerSourcedWithId) = in.client_xact_id(log2Up(arbN)-1,0).toUInt
 }
 
@@ -1117,8 +1168,10 @@ class ClientUncachedTileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters)
     val in = Vec(arbN, new ClientUncachedTileLinkIO).flip
     val out = new ClientUncachedTileLinkIO
   }
-  hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
-  hookupManagerSourceHeaderlessWithId(io.in.map(_.grant), io.out.grant)
+  if (arbN > 1) {
+    hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
+    hookupManagerSourceHeaderlessWithId(io.in.map(_.grant), io.out.grant)
+  } else { io.out <> io.in.head }
 }
 
 /** Concrete client-side arbiter that appends the arbiter's port id to client_xact_id */
@@ -1127,415 +1180,10 @@ class ClientTileLinkIOArbiter(val arbN: Int)(implicit val p: Parameters) extends
     val in = Vec(arbN, new ClientTileLinkIO).flip
     val out = new ClientTileLinkIO
   }
-  hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
-  hookupClientSourceHeaderless(io.in.map(_.release), io.out.release)
-  hookupManagerSourceBroadcast(io.in.map(_.probe), io.out.probe)
-  hookupManagerSourceHeaderlessWithId(io.in.map(_.grant), io.out.grant)
+  if (arbN > 1) {
+    hookupClientSourceHeaderless(io.in.map(_.acquire), io.out.acquire)
+    hookupClientSourceHeaderless(io.in.map(_.release), io.out.release)
+    hookupManagerSourceBroadcast(io.in.map(_.probe), io.out.probe)
+    hookupManagerSourceHeaderlessWithId(io.in.map(_.grant), io.out.grant)
+  } else { io.out <> io.in.head }
 }
-
-class NASTIMasterIOTileLinkIOConverterHandler(id: Int)(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters {
-  val io = new Bundle {
-    val tl = new ManagerTileLinkIO
-    val nasti = new NastiIO
-    val rdy = Bool(OUTPUT)
-    val tl_acq_match = Bool(OUTPUT)
-    val tl_rel_match = Bool(OUTPUT)
-    val na_b_match = Bool(OUTPUT)
-    val na_r_match = Bool(OUTPUT)
-  }
-
-  private def opSizeToXSize(ops: UInt) = MuxLookup(ops, UInt("b111"), Seq(
-    MT_B  -> UInt(0),
-    MT_BU -> UInt(0),
-    MT_H  -> UInt(1),
-    MT_HU -> UInt(1),
-    MT_W  -> UInt(2),
-    MT_WU -> UInt(2),
-    MT_D  -> UInt(3),
-    MT_Q  -> UInt(log2Up(tlDataBytes))))
-
-  // liminations:
-  val dataBits = tlDataBits*tlDataBeats 
-  val dstIdBits = p(LNHeaderBits)
-  require(tlDataBits == nastiXDataBits, "Data sizes between LLC and MC don't agree") // TODO: remove this restriction
-  require(tlDataBeats < (1 << nastiXLenBits), "Can't have that many beats")
-  require(dstIdBits + tlClientXactIdBits < nastiXIdBits, "NASTIIO converter is going truncate tags: " + dstIdBits + " + " + tlClientXactIdBits + " >= " + nastiXIdBits)
-  // assume MI or MEI protocol
-
-  // rename signals
-  val tl_acq = io.tl.acquire.bits
-  val tl_rel = io.tl.release.bits
-  val tl_gnt = io.tl.grant.bits
-  val tl_fin = io.tl.finish.bits
-  val na_aw = io.nasti.aw.bits
-  val na_w = io.nasti.w.bits
-  val na_ar = io.nasti.ar.bits
-  val na_b = io.nasti.b.bits
-  val na_r = io.nasti.r.bits
-
-  // internal control signals
-  val write_multiple_data = Reg(init=Bool(false))
-  val read_multiple_data = Reg(init=Bool(false))
-  val (nw_cnt, nw_finish) =
-    Counter(io.nasti.w.fire() && write_multiple_data, tlDataBeats)
-  val (nr_cnt, nr_finish) =
-    Counter((io.nasti.r.fire() && read_multiple_data), tlDataBeats)
-  val is_read = Reg(init=Bool(false))
-  val is_write = Reg(init=Bool(false))
-  val is_acq = Reg(init=Bool(false))
-  val is_builtin = Reg(init=Bool(false))
-  val tag_out = Reg(UInt(width = nastiXIdBits))
-  val addr_out = Reg(UInt(width = nastiXAddrBits))
-  val len_out = Reg(UInt(width = nastiXLenBits))
-  val size_out = Reg(UInt(width = nastiXSizeBits))
-  val g_type_out = Reg(UInt(width = tlGrantTypeBits))
-  val cmd_sent = Reg(init=Bool(false))
-  val is_idle = !(is_read || is_write)
-
-  // signal to handler allocator
-  io.rdy := is_idle
-  io.tl_acq_match := tag_out === Cat(tl_acq.client_id, tl_acq.client_xact_id) && !io.rdy
-  io.tl_rel_match := tag_out === Cat(tl_rel.client_id, tl_rel.client_xact_id) && !io.rdy
-  io.na_b_match := na_b.id === tag_out && !io.rdy
-  io.na_r_match := na_r.id === tag_out && !io.rdy
-
-  // assigning control registers
-  when(io.nasti.b.fire()) {
-    write_multiple_data := Bool(false)
-    is_write := Bool(false)
-    cmd_sent := Bool(false)
-    is_acq := Bool(false)
-  }
-
-  when(na_r.last && io.nasti.r.fire()) {
-    read_multiple_data := Bool(false)
-    is_read := Bool(false)
-    cmd_sent := Bool(false)
-    is_acq := Bool(false)
-  }
-
-  when(is_idle && io.tl.acquire.valid && !io.tl.release.valid) { // release take priority
-    write_multiple_data := tl_acq.hasMultibeatData()
-    read_multiple_data := !tl_acq.isBuiltInType() || tl_acq.isBuiltInType(Acquire.getBlockType)
-    is_read := tl_acq.isBuiltInType() || !tl_acq.hasData()
-    is_write := tl_acq.isBuiltInType() && tl_acq.hasData()
-    is_acq := Bool(true)
-    is_builtin := tl_acq.isBuiltInType()
-    tag_out := Cat(tl_acq.client_id, tl_acq.client_xact_id)
-    addr_out := Mux(tl_acq.isBuiltInType(), tl_acq.full_addr(), tl_acq.addr_block << (tlBeatAddrBits + tlByteAddrBits))
-    len_out := Mux(!tl_acq.isBuiltInType() || !tl_acq.isSubBlockType(), UInt(tlDataBeats-1), UInt(0))
-    size_out := Mux(!tl_acq.isBuiltInType() || !tl_acq.isSubBlockType() || tl_acq.hasData(),
-                    bytesToXSize(UInt(tlDataBytes)),
-                    opSizeToXSize(tl_acq.op_size()))
-    g_type_out := Mux(tl_acq.isBuiltInType(), tl_acq.getBuiltInGrantType(), UInt(0)) // assume MI or MEI
-  }
-
-  when(is_idle && io.tl.release.valid) {
-    write_multiple_data := Bool(true)
-    read_multiple_data := Bool(false)
-    is_read := Bool(false)
-    is_write := Bool(true)
-    is_builtin := Bool(true)
-    tag_out := Cat(tl_rel.client_id, tl_rel.client_xact_id)
-    addr_out := tl_rel.addr_block << (tlBeatAddrBits + tlByteAddrBits)
-    len_out := UInt(tlDataBeats-1)
-    size_out := bytesToXSize(UInt(tlDataBytes))
-    g_type_out := Grant.voluntaryAckType
-  }
-
-  when(io.nasti.ar.fire() || io.nasti.aw.fire()) {
-    cmd_sent := Bool(true)
-  }
-
-  // nasti.aw
-  io.nasti.aw.valid := is_write && !cmd_sent
-  na_aw.id := tag_out
-  na_aw.addr := addr_out
-  na_aw.len := len_out
-  na_aw.size := size_out
-  na_aw.burst := UInt("b01")
-  na_aw.lock := Bool(false)
-  na_aw.cache := UInt("b0000")
-  na_aw.prot := UInt("b000")
-  na_aw.qos := UInt("b0000")
-  na_aw.region := UInt("b0000")
-  na_aw.user := UInt(0)
-
-  // nasti.w
-  io.nasti.w.valid := ((io.tl.acquire.valid && is_acq) || (io.tl.release.valid && !is_acq)) && is_write
-  na_w.strb := Mux(is_acq && tl_acq.isSubBlockType(), tl_acq.wmask(), SInt(-1, nastiWStrobeBits).toUInt)
-  na_w.data := Mux(is_acq, tl_acq.data, tl_rel.data)
-  na_w.last := nw_finish || is_acq && !tl_acq.hasMultibeatData()
-
-  // nasti.ar
-  io.nasti.ar.valid := is_read && !cmd_sent
-  io.nasti.ar.bits := io.nasti.aw.bits
-
-  // nasti.b
-  io.nasti.b.ready := is_write && io.tl.grant.fire()
-
-  // nasti.r
-  io.nasti.r.ready := is_read && io.tl.grant.fire()
-
-  // tilelink acquire
-  io.tl.acquire.ready := is_acq && (io.nasti.w.fire() || io.nasti.ar.fire())
-
-  // tilelink release
-  io.tl.release.ready := !is_acq && io.nasti.w.fire()
-
-  // tilelink grant
-  io.tl.grant.valid := Mux(is_write, io.nasti.b.valid, io.nasti.r.valid)
-  tl_gnt := Mux(is_write,
-    Grant(
-      dst = tag_out >> tlClientXactIdBits,
-      is_builtin_type = Bool(true),
-      g_type = g_type_out,
-      client_xact_id = tag_out(tlClientXactIdBits-1,0),
-      manager_xact_id = UInt(id)),
-    Grant(
-      dst = tag_out >> tlClientXactIdBits,
-      is_builtin_type = is_builtin,
-      g_type = g_type_out,
-      client_xact_id = tag_out(tlClientXactIdBits-1,0),
-      manager_xact_id = UInt(id),
-      addr_beat = nr_cnt,
-      data = io.nasti.r.bits.data))
-}
-
-class NastiMasterIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters {
-  val io = new Bundle {
-    val tl = new ManagerTileLinkIO
-    val nasti = new NastiIO
-  }
-
-  io.tl.probe.valid := Bool(false)
-  io.tl.release.ready := Bool(false)
-  io.tl.finish.ready := Bool(true)
-
-  val handlerList = (0 until nastiHandlers).map(id => Module(new NASTIMasterIOTileLinkIOConverterHandler(id)))
-  val tlAcqMatches = Vec(handlerList.map(_.io.tl_acq_match)).toBits
-  val tlRelMatches = Vec(handlerList.map(_.io.tl_rel_match)).toBits
-  val tlReady = Vec(handlerList.map(_.io.rdy)).toBits
-  val tlAcqHandlerId = Mux(tlAcqMatches.orR,
-                        PriorityEncoder(tlAcqMatches),
-                        PriorityEncoder(tlReady))
-  val tlRelHandlerId = Mux(tlRelMatches.orR,
-                        PriorityEncoder(tlRelMatches),
-                        PriorityEncoder(tlReady))
-  val naBMatches = Vec(handlerList.map(_.io.na_b_match)).toBits
-  val naRMatches = Vec(handlerList.map(_.io.na_r_match)).toBits
-  val naBHandlerId = PriorityEncoder(naBMatches)
-  val naRHandlerId = PriorityEncoder(naRMatches)
-
-  def doInternalOutputArbitration[T <: Data](
-    out: DecoupledIO[T],
-    ins: Seq[DecoupledIO[T]],
-    count: Int = 1,
-    needsLock: Option[T => Bool] = None)
-  {
-    val arb = Module(new LockingRRArbiter(out.bits, ins.size, count, needsLock, true))
-    out <> arb.io.out
-    arb.io.in <> ins
-  }
-
-  def doInternalInputRouting[T <: Data](in: DecoupledIO[T], outs: Seq[DecoupledIO[T]], id: UInt) {
-    outs.map(_.bits := in.bits)
-    outs.zipWithIndex.map { case (o,i) => o.valid := in.valid && id === UInt(i) }
-  }
-
-  doInternalInputRouting(io.tl.acquire, handlerList.map(_.io.tl.acquire), tlAcqHandlerId)
-  val acq_rdy = Vec(handlerList.map(_.io.tl.acquire.ready))
-  io.tl.acquire.ready := (tlAcqMatches.orR || tlReady.orR) && acq_rdy(tlAcqHandlerId)
-
-  doInternalInputRouting(io.tl.release, handlerList.map(_.io.tl.release), tlRelHandlerId)
-  val rel_rdy = Vec(handlerList.map(_.io.tl.release.ready))
-  io.tl.release.ready := (tlRelMatches.orR || tlReady.orR) && rel_rdy(tlRelHandlerId)
-
-  doInternalOutputArbitration(io.tl.grant, handlerList.map(_.io.tl.grant))
-
-  doInternalOutputArbitration(io.nasti.ar, handlerList.map(_.io.nasti.ar))
-
-  // NASTI.w does not allow interleaving
-  def w_multibeat(w: NastiWriteDataChannel): Bool = !w.last
-  doInternalOutputArbitration(io.nasti.w, handlerList.map(_.io.nasti.w), tlDataBeats, w_multibeat _)
-
-  doInternalOutputArbitration(io.nasti.aw, handlerList.map(_.io.nasti.aw))
-
-  doInternalInputRouting(io.nasti.b, handlerList.map(_.io.nasti.b), naBHandlerId)
-  val na_b_rdy = Vec(handlerList.map(_.io.nasti.b.ready))
-  io.nasti.b.ready := naBMatches.orR && na_b_rdy(naBHandlerId)
-
-  doInternalInputRouting(io.nasti.r, handlerList.map(_.io.nasti.r), naRHandlerId)
-  val na_r_rdy = Vec(handlerList.map(_.io.nasti.r.ready))
-  io.nasti.r.ready := naRMatches.orR && na_r_rdy(naRHandlerId)
-}
-
-class NastiLiteMasterIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p) with HasNastiParameters with HasTileLinkParameters {
-  val io = new Bundle {
-    val tl = new ManagerTileLinkIO
-    val nasti = new NastiIO
-  }
-
-  // need careful revision if need to support 64-bit NASTI-Lite interface
-  require(nastiXDataBits == 32)
-
-  // request (transmit) states
-  val t_idle :: t_req0 :: t_req1 :: t_busy :: Nil = Enum(UInt(), 4)
-  val t_state = Reg(init=t_idle)
-
-  // response (receiver) states
-  val r_idle :: r_resp0 :: r_resp1 :: r_grant :: Nil = Enum(UInt(), 4)
-  val r_state = Reg(init=r_idle)
-
-  // internal transaction information
-  val client_id = RegEnable(io.tl.acquire.bits.client_id, io.tl.acquire.valid)
-  val client_xact_id = RegEnable(io.tl.acquire.bits.client_xact_id, io.tl.acquire.valid)
-  val grant_type = RegEnable(io.tl.acquire.bits.getBuiltInGrantType(), io.tl.acquire.valid)
-  val op_size = RegEnable(io.tl.acquire.bits.op_size(), io.tl.acquire.valid)
-  val addr_high = RegEnable(io.tl.acquire.bits.addr_byte()(2), io.tl.acquire.valid)
-  val data_buf = RegEnable(io.nasti.r.bits.data, r_state === r_resp0 && io.nasti.r.valid) // the higher 32-bit for 64-bit read
-
-  // set initial values for ports
-  io.tl.probe.valid := Bool(false)
-  io.tl.release.ready := Bool(false)
-
-  io.nasti.aw.valid := Bool(false)
-  io.nasti.w.valid := Bool(false)
-  io.nasti.b.ready := Bool(false)
-  io.nasti.ar.valid := Bool(false)
-  io.nasti.r.ready := Bool(false)
-
-  // drive IOs according to states
-
-  // tl.Acquire
-  io.tl.acquire.ready := t_state === t_busy && io.tl.acquire.valid // key addr and dara valid
-
-  // tl.Grant
-  io.tl.grant.valid := r_state === r_grant
-  io.tl.grant.bits := Mux(grant_type === Grant.putAckType,
-    Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0)),
-    Grant(client_id, Bool(true), grant_type, client_xact_id, UInt(0), UInt(0),
-          Cat(Mux(op_size === MT_D, io.nasti.r.bits.data, 
-              Mux(addr_high, data_buf, UInt(0,32))), 
-              Mux(addr_high, UInt(0,32), data_buf)))) // return data always aligns with 64-bit boundary
-
-  // tl.Finish
-  io.tl.finish.ready := Bool(true)
-
-  // NASTI.AW
-  val aw_fire = Reg(Bool())
-  when((t_state === t_req0 || t_state === t_req1) && !aw_fire) {
-    aw_fire := io.nasti.aw.fire()
-  }
-  io.nasti.aw.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~aw_fire
-  io.nasti.aw.bits.id := UInt(0)
-  val tlNastiLiteXacts = tlDataBits / nastiXDataBits
-  require(tlNastiLiteXacts > 0)
-  val wmasks = Vec((0 until tlNastiLiteXacts).map(i => io.tl.acquire.bits.wmask()(i*4+3, i*4)))
-  val wmasks_bv = Vec(wmasks.map(_.orR))
-  val waddr_byte = PriorityEncoder(wmasks_bv.toBits)
-  val waddr = Cat(io.tl.acquire.bits.addr_block, io.tl.acquire.bits.addr_beat, waddr_byte, UInt("b00"))
-  val double_write = !waddr_byte(0) && wmasks_bv(waddr_byte| UInt(1))
-  io.nasti.aw.bits.addr := Mux(t_state === t_req0, waddr, waddr | UInt("b100"))
-  io.nasti.aw.bits.prot := UInt("b000")
-  io.nasti.aw.bits.region := UInt("b0000")
-  io.nasti.aw.bits.qos := UInt("b0000")
-  io.nasti.aw.bits.user := UInt(0)
-  
-  // NASTI.W
-  val w_fire = Reg(Bool())
-  when((t_state === t_req0 || t_state === t_req1) && !w_fire) {
-    w_fire := io.nasti.w.fire()
-  }
-  io.nasti.w.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.putAckType && ~w_fire
-
-  val data_vec = Vec((0 until tlNastiLiteXacts).map(i =>
-    io.tl.acquire.bits.data(i*nastiXDataBits + nastiXDataBits - 1, i*nastiXDataBits)))
-  io.nasti.w.bits.data := data_vec(io.nasti.aw.bits.addr(tlByteAddrBits-1, nastiXOffBits))
-
-  val mask_vec = Vec((0 until tlNastiLiteXacts).map(i =>
-    io.tl.acquire.bits.wmask()(i*nastiWStrobeBits + nastiWStrobeBits - 1, i*nastiWStrobeBits)))
-  io.nasti.w.bits.strb := mask_vec(io.nasti.aw.bits.addr(tlByteAddrBits-1, nastiXOffBits))
-
-  // the write address and data combined fire
-  val wr_fire = (io.nasti.aw.fire() || aw_fire) && (io.nasti.w.fire() || w_fire)
-
-  // NASTI.AR
-  io.nasti.ar.valid := (t_state === t_req0 || t_state === t_req1) && grant_type === Grant.getDataBeatType
-  io.nasti.ar.bits.id := UInt(0)
-  val raddr = io.tl.acquire.bits.full_addr()
-  io.nasti.ar.bits.addr := Mux(t_state === t_req0, raddr, raddr | UInt("b100"))
-  io.nasti.ar.bits.prot := UInt("b000")
-  io.nasti.ar.bits.region := UInt("b0000")
-  io.nasti.ar.bits.qos := UInt("b0000")
-  io.nasti.ar.bits.user := UInt(0)
-
-  // NASTI.B
-  io.nasti.b.ready := (r_state === r_resp0 || r_state === r_resp1) && grant_type === Grant.putAckType
-
-  // NASTI.R
-  when(grant_type === Grant.getDataBeatType) {
-    io.nasti.r.ready := r_state === r_resp0 && op_size === MT_D ||io.tl.grant.fire()
-  }
-
-  // request state machine
-  switch(t_state) {
-    is(t_idle) {
-      when(io.tl.acquire.valid) {
-        t_state := t_req0
-        aw_fire := Bool(false)
-        w_fire := Bool(false)
-      }
-    }
-    is(t_req0) {
-      when(io.nasti.ar.fire()) {
-        t_state := Mux(op_size === MT_D, t_req1, t_busy)
-      }
-      when(wr_fire) {
-        t_state := Mux(double_write, t_req1, t_busy)
-        aw_fire := Bool(false)
-        w_fire := Bool(false)
-      }
-    }
-    is(t_req1) {
-      when(wr_fire || io.nasti.ar.fire()) {
-        t_state := t_busy
-        aw_fire := Bool(false)
-        w_fire := Bool(false)
-      }
-    }
-    is(t_busy) {
-      when(io.tl.grant.fire()) {
-        t_state := t_idle
-      }
-    }
-  }
-
-  // response state machine
-  switch(r_state) {
-    is(r_idle) {
-      when(io.nasti.aw.fire() || io.nasti.ar.fire()) {
-        r_state := r_resp0
-      }
-    }
-    is(r_resp0) {
-      when(io.nasti.r.valid) {
-        r_state := Mux(op_size === MT_D, r_resp1, r_grant)
-      }
-      when(io.nasti.b.valid) {
-        r_state := Mux(double_write, r_resp1, r_grant)
-      }
-    }
-    is(r_resp1) {
-      when(io.nasti.b.valid || io.nasti.r.valid) {
-        r_state := r_grant
-      }
-    }
-    is(r_grant) {
-      when(io.tl.grant.valid) {
-        r_state := r_idle
-      }
-    }
-  }
-}
-

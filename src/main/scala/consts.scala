@@ -19,7 +19,7 @@ trait MemoryOpConstants {
   val MT_Q  = UInt("b0111")
   val MT_T  = UInt("b1111") // tag
 
-  val NUM_XA_OPS = 9 // ?? not used
+  val NUM_XA_OPS = 9
   val M_SZ      = 5
   val M_X       = BitPat("b?????");
   val M_XRD     = UInt("b00000"); // int load
