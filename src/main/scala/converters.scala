@@ -58,7 +58,7 @@ class TileLinkIOMamIOConverter extends TLModule
     PutBlock(
       client_xact_id = UInt(0),
       addr_block = reqSerDes.io.tl_addr >> (tlBeatAddrBits + tlByteAddrBits),
-      addr_beat = tl_cnt << tlByteAddrBits,
+      addr_beat = tl_cnt,
       data = mam_data_buffer.io.out.bits,
       wmask = mam_mask_buffer.io.out.bits
     )
