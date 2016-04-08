@@ -25,28 +25,30 @@ class TileLinkIOMamIOConverter extends TLModule
   reqSerDes.io.mam.req <> io.mam.req
   reqSerDes.io.tl_ready := Bool(false)
 
+  val tl_beat_byte_count = Mux(reqSerDes.io.tl_block, UInt(tlDataBytes), reqSerDes.io.tl_count)
+
   val mam_data_buffer =
     Module(new SerDesBuffer(8, cacheBlockBytes, mamBytes, tlDataBytes))
   val mam_data_buffer_in_data = Wire(Vec(mamBytes, UInt(width=8)))
   mam_data_buffer.io.in.valid := io.mam.wdata.valid
-  mam_data_buffer.io.out.ready := io.tl.acquire.ready
+  mam_data_buffer.io.out.ready := io.tl.acquire.fire()
   mam_data_buffer.io.in_size := UInt(mamBytes)
-  mam_data_buffer.io.out_size := reqSerDes.io.tl_count
+  mam_data_buffer.io.out_size := tl_beat_byte_count
 
   val mam_mask_buffer =
     Module(new SerDesBuffer(1, cacheBlockBytes, mamBytes, tlDataBytes))
   val mam_mask_buffer_in_data = Wire(Vec(mamBytes, Bool()))
   mam_mask_buffer.io.in.valid := io.mam.wdata.valid
-  mam_mask_buffer.io.out.ready := io.tl.acquire.ready
+  mam_mask_buffer.io.out.ready := io.tl.acquire.fire()
   mam_mask_buffer.io.in_size := UInt(mamBytes)
-  mam_mask_buffer.io.out_size := reqSerDes.io.tl_count
+  mam_mask_buffer.io.out_size := tl_beat_byte_count
 
   val tl_data_buffer =
     Module(new SerDesBuffer(8, cacheBlockBytes, tlDataBytes, mamBytes))
   val tl_data_buffer_in_data = Wire(Vec(tlDataBytes, UInt(width=8)))
   tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
-  tl_data_buffer.io.in_size := reqSerDes.io.tl_count
+  tl_data_buffer.io.in_size := tl_beat_byte_count
   tl_data_buffer.io.out_size := UInt(mamBytes)
 
   val tl_burst_beat_fire = reqSerDes.io.tl_block &&
@@ -181,7 +183,9 @@ class MamReqSerDes extends TLModule
   }
 
   io.tl_rw := req.rw
-  io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBlockAddrBits-1,0) === UInt(0)
+  // temporarily disable block read/write until merging updates from Berkeley
+  //io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBeatAddrBits+tlByteAddrBits-1,0) === UInt(0)
+  io.tl_block := Bool(false)
   io.tl_addr := Cat(req.addr >> tlByteAddrBits, UInt(0, width=tlByteAddrBits))
   io.tl_shift := req.addr(tlByteAddrBits-1,0)
   io.tl_count := Mux(io.tl_block, UInt(cacheBytes), // a whole cache line
