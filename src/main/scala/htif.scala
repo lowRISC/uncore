@@ -8,6 +8,7 @@ import junctions._
 import junctions.NastiConstants._
 import cde.{Parameters, Field}
 
+case object NTiles extends Field[Int]
 case object HtifKey extends Field[HtifParameters]
 
 case class HtifParameters(width: Int, nCores: Int, offsetBits: Int, csrDataBits: Int, nSCR: Int = 64)

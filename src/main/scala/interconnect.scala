@@ -294,11 +294,15 @@ class TileLinkRecursiveInterconnect(
         case MemSize(_, _) =>
           io.out(outInd) <> xbarOut
           outInd += 1
-        case MemSubmap(_, submap) =>
+        case MemSubmap(_, submap, ext) =>
           if (submap.isEmpty) {
             xbarOut.acquire.ready := Bool(false)
             xbarOut.grant.valid := Bool(false)
-          } else {
+          } else if(ext) { // no expension
+            io.out(outInd) <> xbarOut
+            outInd += 1
+          }
+          else {
             val subSlaves = submap.countSlaves
             val outputs = io.out.drop(outInd).take(subSlaves)
             val ic = Module(new TileLinkRecursiveInterconnect(1, subSlaves, submap, start))

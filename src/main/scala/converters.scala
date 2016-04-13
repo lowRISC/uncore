@@ -307,6 +307,14 @@ trait HasDataBeatCounters {
   }
 }
 
+object ClientTileLinkIOUnwrapper {
+  def apply(tl: ClientTileLinkIO)(implicit p: Parameters): ClientUncachedTileLinkIO = {
+    val conv = Module(new ClientTileLinkIOUnwrapper)
+    conv.io.in <> tl
+    conv.io.out
+  }
+}
+
 class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
   val io = new Bundle {
     val in = new ClientTileLinkIO().flip
