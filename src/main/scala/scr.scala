@@ -1,10 +1,30 @@
 package uncore
 
 import Chisel._
-import junctions.{SmiIO, MMIOBase}
-import cde.Parameters
+import junctions.{SmiIO, MMIOBase, ParameterizedBundle}
+import cde.{Parameters, Field}
 import scala.collection.mutable.HashMap
 import scala.collection.mutable.ArrayBuffer
+
+case object SCRKey extends Field[SCRParameters]
+case class SCRParameters(nCores: Int, offsetBits: Int, csrDataBits: Int, nSCR: Int = 64)
+
+trait HasSCRParameters {
+  implicit val p: Parameters
+  val scrExternal = p(SCRKey)
+  val nSCR = scrExternal.nSCR
+  val scrAddrBits = log2Up(nSCR)
+  val scrDataBits = 64
+  val scrDataBytes = scrDataBits / 8
+  val csrDataBits = scrExternal.csrDataBits
+  val csrDataBytes = csrDataBits / 8
+  val offsetBits = scrExternal.offsetBits
+  val nCores = scrExternal.nCores
+}
+
+abstract class SCRModule(implicit val p: Parameters) extends Module with HasSCRParameters
+abstract class SCRBundle(implicit val p: Parameters) extends ParameterizedBundle()(p)
+    with HasSCRParameters
 
 /** Stores a map between SCR file names and address in the SCR file, which can
   * later be dumped to a header file for the test bench. */
@@ -35,7 +55,7 @@ class SCRFileMap(prefix: String, maxAddress: Int, baseAddress: BigInt) {
   }
 }
 
-class SCRIO(map: SCRFileMap)(implicit p: Parameters) extends HtifBundle()(p) {
+class SCRIO(map: SCRFileMap)(implicit p: Parameters) extends SCRBundle()(p) {
   val rdata = Vec(nSCR, Bits(INPUT, scrDataBits))
   val wen = Bool(OUTPUT)
   val waddr = UInt(OUTPUT, log2Up(nSCR))
@@ -59,7 +79,7 @@ class SCRIO(map: SCRFileMap)(implicit p: Parameters) extends HtifBundle()(p) {
   }
 }
 
-class SCRFile(prefix: String, baseAddress: BigInt)(implicit p: Parameters) extends HtifModule()(p) {
+class SCRFile(prefix: String, baseAddress: BigInt)(implicit p: Parameters) extends SCRModule()(p) {
   val map = new SCRFileMap(prefix, 64, baseAddress)
   AllSCRFiles += map
 

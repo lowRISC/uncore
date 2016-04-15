@@ -6,8 +6,8 @@ import cde.{Parameters, Field}
 
 case object RTCPeriod extends Field[Int]
 
-class RTC(csr_MTIME: Int)(implicit p: Parameters) extends HtifModule
-    with HasTileLinkParameters
+class RTC(csr_MTIME: Int)(implicit p: Parameters) extends TLModule
+    with HasSCRParameters
     with HasAddrMapParameters {
   val io = new ClientUncachedTileLinkIO
 

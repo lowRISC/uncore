@@ -84,7 +84,7 @@ class DmaManager(outstandingCSR: Int)(implicit p: Parameters)
     extends DmaModule()(p)
     with HasNastiParameters
     with HasAddrMapParameters
-    with HasHtifParameters {
+    with HasSCRParameters {
 
   val io = new Bundle {
     val ctrl = (new NastiIO).flip
