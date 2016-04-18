@@ -1149,7 +1149,7 @@ class MMIOTileLinkManager(implicit p: Parameters)
 /** Bridge connect MAM system interface master to TileLink slave.
   * Provide a system interface master for read/write cache/memory
   */
-//class TileLinkIOMamIOConverter(implicit p: Parameters) extends TLModule()(p)
+class TileLinkIOMamIOConverter(implicit p: Parameters) extends TLModule()(p)
     with HasMamParameters
 {
   val io = new Bundle {
@@ -1157,8 +1157,8 @@ class MMIOTileLinkManager(implicit p: Parameters)
     val tl = new ClientUncachedTileLinkIO
   }
 
-  require(mamAddrBits >= params(PAddrBits))
-  val cacheBlockBytes = params(CacheBlockBytes)
+  require(mamAddrBits >= p(PAddrBits))
+  val cacheBlockBytes = p(CacheBlockBytes)
 
   val reqSerDes = Module(new MamReqSerDes)
   reqSerDes.io.mam.req <> io.mam.req
@@ -1289,14 +1289,12 @@ class MMIOTileLinkManager(implicit p: Parameters)
 class MamReqSerDes(implicit p: Parameters) extends TLModule()(p)
     with HasMamParameters
 {
-//  val cacheBytes = p(CacheBlockBytes)
-  val cacheBytes = params(CacheBlockBytes)
+  val cacheBytes = p(CacheBlockBytes)
   val io = new Bundle {
     val mam = (new MamIOReqChannel).flip
     val tl_rw = Bool(OUTPUT)                 // read/write request
     val tl_block = Bool(OUTPUT)              // beat or block
-//    val tl_addr = UInt(OUTPUT, width=p(PAddrBits)) // TileLink request address
-    val tl_addr = UInt(OUTPUT, width=params(PAddrBits)) // TileLink request address
+    val tl_addr = UInt(OUTPUT, width=p(PAddrBits)) // TileLink request address
     val tl_shift = UInt(OUTPUT, width=tlByteAddrBits) // shift data to align beat
     val tl_count = UInt(OUTPUT, width=tlBlockAddrBits+1) // number of data to read/write
     val tl_valid = Bool(OUTPUT)

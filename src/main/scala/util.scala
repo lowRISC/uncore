@@ -116,6 +116,7 @@ object FlowThroughSerializer {
     in.ready := fs.io.in.ready
     fs.io.out
   }
+}
 
 class SerDesBuffer(dw: Int, size: Int, ipw: Int, opw: Int) extends Module {
   val pointerWidth = log2Up(size) + 1
