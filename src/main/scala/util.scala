@@ -116,4 +116,41 @@ object FlowThroughSerializer {
     in.ready := fs.io.in.ready
     fs.io.out
   }
+
+class SerDesBuffer(dw: Int, size: Int, ipw: Int, opw: Int) extends Module {
+  val pointerWidth = log2Up(size) + 1
+  val io = new Bundle {
+    val in = Decoupled(UInt(width=ipw*dw)).flip
+    val in_size = UInt(INPUT, width=log2Up(ipw+1))
+    val out = Decoupled(UInt(width=opw*dw))
+    val out_size = UInt(INPUT, width=log2Up(opw+1))
+    val count = UInt(OUTPUT, width=pointerWidth)
+  }
+
+  val wp = Reg(init = UInt(0, width=pointerWidth))
+  val wp_w = Wire(UInt(width=pointerWidth))
+  val wp_r = Wire(UInt(width=pointerWidth))
+  val buffer = Reg(init = UInt(0, width=size*dw))
+  val buffer_w = Wire(UInt(width=(size+ipw)*dw))
+  val din_mask = Wire(UInt(width=ipw*dw))
+  val buffer_r = Wire(UInt(width=size*dw))
+  val size_u = UInt(size)
+  val dw_u = UInt(dw)
+  val ipw_u = UInt(ipw)
+  val opw_u = UInt(opw)
+
+  wp_w := Mux(io.in.fire(), wp + io.in_size, wp)
+  din_mask := FillInterleaved(dw, (UInt(1) << io.in_size) - UInt(1))
+  buffer_w := Mux(io.in.fire(), ((io.in.bits & din_mask) << (wp * dw_u)) | buffer, buffer)
+
+  wp_r := Mux(io.out.fire(), wp_w - io.out_size, wp_w)
+  buffer_r := buffer_w(size*dw-1,0) >> Mux(io.out.fire(), (io.out_size * dw_u), UInt(0))
+
+  wp := wp_r
+  buffer := buffer_r
+
+  io.in.ready := wp + ipw_u <= size_u
+  io.out.valid := io.out_size =/= UInt(0) && wp >= io.out_size
+  io.count := wp
+  io.out.bits := buffer
 }
