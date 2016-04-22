@@ -277,6 +277,7 @@ class TileLinkRecursiveInterconnect(
 
     realAddrMap(i) = (start, size)
     lastEnd = start + size
+    println(f"RecursiveTileLink: $name ($start%x,$size%x) index:$i")
   }
 
   val routeSel = (addr: UInt) => {
@@ -298,11 +299,10 @@ class TileLinkRecursiveInterconnect(
           if (submap.isEmpty) {
             xbarOut.acquire.ready := Bool(false)
             xbarOut.grant.valid := Bool(false)
-          } else if(ext) { // no expension
+          } else if (ext) { // no expension
             io.out(outInd) <> xbarOut
             outInd += 1
-          }
-          else {
+          } else {
             val subSlaves = submap.countSlaves
             val outputs = io.out.drop(outInd).take(subSlaves)
             val ic = Module(new TileLinkRecursiveInterconnect(1, subSlaves, submap, start))

@@ -37,8 +37,8 @@ case class TileLinkParameters(
     overrideDataBitsPerBeat: Option[Int] = None
     ) {
   val nClients = nCachingClients + nCachelessClients
-  val writeMaskBits: Int  = ((dataBits / dataBeats) - 1) / 8 + 1
   val dataBitsPerBeat: Int = overrideDataBitsPerBeat.getOrElse(dataBits / dataBeats)
+  val writeMaskBits: Int  = (dataBitsPerBeat - 1) / 8 + 1
 }
 
   
@@ -58,13 +58,14 @@ trait HasTileLinkParameters {
   val tlMaxManagerXacts = tlExternal.maxManagerXacts
   val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort)
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
-  val tlBlockAddrBits = p(PAddrBits) - p(CacheBlockOffsetBits)
   val tlDataBeats = tlExternal.dataBeats
   val tlDataBits = tlExternal.dataBitsPerBeat
   val tlDataBytes = tlDataBits/8
   val tlWriteMaskBits = tlExternal.writeMaskBits
   val tlBeatAddrBits = log2Up(tlDataBeats)
   val tlByteAddrBits = log2Up(tlWriteMaskBits)
+  val tlBlockOffsetBits = tlByteAddrBits + (if (tlDataBeats > 1) tlBeatAddrBits else 0)
+  val tlBlockAddrBits = p(PAddrBits) - tlBlockOffsetBits
   val tlMemoryOpcodeBits = M_SZ
   val tlMemoryOperandSizeBits = MT_SZ
   val tlAcquireTypeBits = max(log2Up(Acquire.nBuiltInTypes), 
@@ -80,6 +81,13 @@ trait HasTileLinkParameters {
   val tlNetworkDoesNotInterleaveBeats = true
   val amoAluOperandBits = p(AmoAluOperandBits)
   val amoAluOperandBytes = amoAluOperandBits/8
+
+  def getBlockAddr(addr:UInt): UInt = addr >> tlBlockOffsetBits
+  def getBeatAddr(addr:UInt): UInt =
+    if (tlDataBeats > 1) addr(tlBlockOffsetBits-1, tlByteAddrBits) else UInt(0)
+  def getByteAddr(addr:UInt): UInt = addr(tlByteAddrBits-1, 0)
+  def getFullAddr(blockAddr:UInt, beatAddr:UInt, byteAddr:UInt): UInt =
+    if (tlDataBeats > 1) Cat(blockAddr, beatAddr, byteAddr) else Cat(blockAddr, byteAddr)
 }
 
 abstract class TLModule(implicit val p: Parameters) extends Module
@@ -279,7 +287,7 @@ class AcquireMetadata(implicit p: Parameters) extends ClientToManagerChannel
     with HasAcquireType
     with HasAcquireUnion {
   /** Complete physical address for block, beat or operand */
-  def full_addr(dummy: Int = 0) = Cat(this.addr_block, this.addr_beat, this.addr_byte())
+  def full_addr(dummy: Int = 0) = getFullAddr(this.addr_block, this.addr_beat, this.addr_byte())
 }
 
 /** [[uncore.AcquireMetadata]] with an extra field containing the data beat */
@@ -687,7 +695,7 @@ class ReleaseMetadata(implicit p: Parameters) extends ClientToManagerChannel
     with HasCacheBlockAddress 
     with HasClientTransactionId 
     with HasReleaseType {
-  def full_addr(dummy: Int = 0) = Cat(this.addr_block, this.addr_beat, UInt(0, width = tlByteAddrBits))
+  def full_addr(dummy: Int = 0) = getFullAddr(this.addr_block, this.addr_beat, UInt(0, width = tlByteAddrBits))
 }
 
 /** [[uncore.ReleaseMetadata]] with an extra field containing the data beat */

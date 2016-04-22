@@ -43,16 +43,17 @@ class RTC(csr_MTIME: Int)(implicit p: Parameters) extends TLModule
   when (io.grant.fire()) { send_acked(io.grant.bits.client_xact_id) := Bool(true) }
 
   val addr_full = addrTable(coreId)
-  val addr_block = addr_full(p(PAddrBits) - 1, p(CacheBlockOffsetBits))
-  val addr_beat = addr_full(p(CacheBlockOffsetBits) - 1, tlByteAddrBits)
-  val addr_byte = addr_full(tlByteAddrBits - 1, 0)
-  val wmask = Fill(csrDataBytes, UInt(1, 1)) << addr_byte
+  val wmask = Fill(csrDataBytes, UInt(1, 1)) << getByteAddr(addr_full)
+
+
+  val rtc_addr = addrMap(s"conf:csr0").start + csr_MTIME * csrDataBytes
+  println(f"RTC full address:$rtc_addr%x")
 
   io.acquire.valid := sending
   io.acquire.bits := Put(
     client_xact_id = coreId,
-    addr_block = addr_block,
-    addr_beat = addr_beat,
+    addr_block = getBlockAddr(addr_full),
+    addr_beat = getBeatAddr(addr_full),
     wmask = wmask,
     data = Fill(tlDataBytes / csrDataBytes, rtc))
   io.grant.ready := Bool(true)
