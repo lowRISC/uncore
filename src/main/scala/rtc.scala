@@ -45,10 +45,6 @@ class RTC(csr_MTIME: Int)(implicit p: Parameters) extends TLModule
   val addr_full = addrTable(coreId)
   val wmask = Fill(csrDataBytes, UInt(1, 1)) << getByteAddr(addr_full)
 
-
-  val rtc_addr = addrMap(s"conf:csr0").start + csr_MTIME * csrDataBytes
-  println(f"RTC full address:$rtc_addr%x")
-
   io.acquire.valid := sending
   io.acquire.bits := Put(
     client_xact_id = coreId,
