@@ -125,12 +125,12 @@ class PortedTileLinkCrossbar(
   // Shims for converting between logical network IOs and physical network IOs
   def crossbarToManagerShim[T <: Data](in: PNIO[T]): LNIO[T] = {
     val out = DefaultFromPhysicalShim(in)
-    out.bits.header.src := in.bits.header.src - UInt(nManagers, phyHdrWidth)
+    out.bits.header.src := in.bits.header.src - UInt(nManagers)
     out
   }
   def crossbarToClientShim[T <: Data](in: PNIO[T]): LNIO[T] = {
     val out = DefaultFromPhysicalShim(in)
-    out.bits.header.dst := in.bits.header.dst - UInt(nManagers, phyHdrWidth)
+    out.bits.header.dst := in.bits.header.dst - UInt(nManagers)
     out
   }
   def managerToCrossbarShim[T <: Data](in: LNIO[T]): PNIO[T] = {
