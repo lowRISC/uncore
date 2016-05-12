@@ -1,10 +1,9 @@
 package uncore
 
 import Chisel._
-import junctions.{SmiIO, ParameterizedBundle}
+import junctions.{SmiIO, GlobalMaps,ParameterizedBundle}
 import cde.{Parameters, Field}
 import scala.collection.mutable.HashMap
-import scala.collection.mutable.ArrayBuffer
 
 case object SCRKey extends Field[SCRParameters]
 case class SCRParameters(nCores: Int, offsetBits: Int, csrDataBits: Int, nSCR: Int = 64)
@@ -114,9 +113,4 @@ class SCRFile(prefix: String, baseAddress: BigInt)(implicit p: Parameters) exten
 
 /** Every elaborated SCR file ends up in this global arry so it can be printed
   * out later. */
-object AllSCRFiles {
-  private var maps = ArrayBuffer.empty[SCRFileMap]
-
-  def +=(map: SCRFileMap): Unit = { maps += map }
-  def foreach( f: (SCRFileMap => Unit) ): Unit = { maps.foreach{ m => f(m) } }
-}
+object AllSCRFiles extends GlobalMaps[SCRFileMap]
