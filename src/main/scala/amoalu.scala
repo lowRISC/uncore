@@ -33,7 +33,7 @@ class StoreGenAligned(typ: UInt, addr: UInt, dat: UInt, maxSize: Int) extends St
 
 class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool, maxSize: Int) {
   private val t = new StoreGen(typ, addr, dat, maxSize)
-  private val signed = typ.toSInt >= SInt(0)
+  private val signed = !typ(log2Up(log2Up(maxSize)+1))
 
   private def genData(logMinSize: Int): UInt = {
     var res = dat
