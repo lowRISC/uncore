@@ -383,11 +383,16 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
 
   io.out.acquire <> acqArb.io.out
 
-  acqRoq.io.deq.valid := io.out.grant.fire() && ognt.last()
+  val grant_deq_roq = io.out.grant.fire() && ognt.last()
+
+  acqRoq.io.deq.valid := acqRoq.io.deq.matches && grant_deq_roq
   acqRoq.io.deq.tag := ognt.client_xact_id
 
-  relRoq.io.deq.valid := io.out.grant.fire() && ognt.last()
+  relRoq.io.deq.valid := relRoq.io.deq.matches && grant_deq_roq
   relRoq.io.deq.tag := ognt.client_xact_id
+
+  assert(!grant_deq_roq || acqRoq.io.deq.matches || relRoq.io.deq.matches,
+    "TileLink Unwrapper: client_xact_id mismatch")
 
   val gnt_builtin = acqRoq.io.deq.data
   val gnt_voluntary = relRoq.io.deq.data
@@ -437,7 +442,7 @@ class NastiIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p)
     MT_D  -> UInt(3),
     MT_Q  -> UInt(log2Up(tlDataBytes))))
 
-  val dataBits = tlDataBits*tlDataBeats 
+  val dataBits = tlDataBits*tlDataBeats
   require(tlDataBits == nastiXDataBits, "Data sizes between LLC and MC don't agree") // TODO: remove this restriction
   require(tlDataBeats < (1 << nastiXLenBits), "Can't have that many beats")
   require(tlClientXactIdBits <= nastiXIdBits, "NastiIO converter is going truncate tags: " + tlClientXactIdBits + " > " + nastiXIdBits)
@@ -536,7 +541,9 @@ class NastiIOTileLinkIOConverter(implicit p: Parameters) extends TLModule()(p)
     manager_xact_id = UInt(0),
     addr_beat = Mux(roq.io.deq.data.subblock, roq.io.deq.data.addr_beat, tl_cnt_in),
     data = io.nasti.r.bits.data)
-  assert(!gnt_arb.io.in(0).valid || roq.io.deq.matches, "NASTI tag error")
+
+  assert(!roq.io.deq.mismatch(),
+    "TL -> NASTI converter ReorderQueue: NASTI tag error")
 
   gnt_arb.io.in(1).valid := io.nasti.b.valid
   io.nasti.b.ready := gnt_arb.io.in(1).ready

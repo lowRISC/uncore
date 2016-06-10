@@ -178,7 +178,10 @@ trait HasAcquireUnion extends HasTileLinkParameters {
   def op_size(dummy: Int = 0) = union(addrByteOff-1, opSizeOff)
   /** Byte address for [[uncore.PutAtomic]] operand */
   def addr_byte(dummy: Int = 0) = union(addrByteMSB-1, addrByteOff)
-  def amo_offset(dummy: Int = 0) = addr_byte()(tlByteAddrBits-1, log2Up(amoAluOperandBytes))
+//  def amo_offset(dummy: Int = 0) = addr_byte()(tlByteAddrBits-1, log2Up(amoAluOperandBytes))
+// temporary method to use 32-bit TileLink bus
+  def amo_offset(dummy: Int = 0) = if(tlDataBits < 64) UInt(0) else
+    addr_byte()(tlByteAddrBits-1, log2Up(amoAluOperandBytes))
   /** Bit offset of [[uncore.PutAtomic]] operand */
   def amo_shift_bytes(dummy: Int = 0) = UInt(amoAluOperandBytes)*amo_offset()
   /** Write mask for [[uncore.Put]], [[uncore.PutBlock]], [[uncore.PutAtomic]] */
