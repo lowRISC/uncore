@@ -37,8 +37,8 @@ case class TileLinkParameters(
     overrideDataBitsPerBeat: Option[Int] = None
     ) {
   val nClients = nCachingClients + nCachelessClients
+  val writeMaskBits: Int  = ((dataBits / dataBeats) - 1) / 8 + 1
   val dataBitsPerBeat: Int = overrideDataBitsPerBeat.getOrElse(dataBits / dataBeats)
-  val writeMaskBits: Int  = (dataBitsPerBeat - 1) / 8 + 1
 }
 
   
