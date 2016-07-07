@@ -1300,9 +1300,7 @@ class MamReqSerDes(implicit p: Parameters) extends TLModule()(p)
   }
 
   io.tl_rw := req.rw
-  // temporarily disable block read/write until merging updates from Berkeley
-  //io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBeatAddrBits+tlByteAddrBits-1,0) === UInt(0)
-  io.tl_block := Bool(false)
+  io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBeatAddrBits+tlByteAddrBits-1,0) === UInt(0)
   io.tl_addr := Cat(req.addr >> tlByteAddrBits, UInt(0, width=tlByteAddrBits))
   io.tl_shift := req.addr(tlByteAddrBits-1,0)
   io.tl_count := Mux(io.tl_block, UInt(cacheBytes), // a whole cache line
