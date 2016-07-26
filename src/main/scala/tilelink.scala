@@ -56,7 +56,7 @@ trait HasTileLinkParameters {
   val tlMaxClientXacts = tlExternal.maxClientXacts
   val tlMaxClientsPerPort = tlExternal.maxClientsPerPort
   val tlMaxManagerXacts = tlExternal.maxManagerXacts
-  val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort)
+  val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort) + log2Up(tlNClients) // lost id in Uncached crossabr
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
   val tlDataBeats = tlExternal.dataBeats
   val tlDataBits = tlExternal.dataBitsPerBeat
