@@ -19,7 +19,7 @@ trait MemoryOpConstants {
   val MT_Q  = UInt("b0111")
   val MT_T  = UInt("b1111") // tag
 
-  val NUM_XA_OPS = 9 // ?? not used
+  val NUM_XA_OPS = 9
   val M_SZ      = 5
   val M_X       = BitPat("b?????");
   val M_XRD     = UInt("b00000"); // int load
@@ -47,17 +47,4 @@ trait MemoryOpConstants {
   def isRead(cmd: UInt) = cmd === M_XRD || cmd === M_XLR || cmd === M_XSC || isAMO(cmd)
   def isWrite(cmd: UInt) = cmd === M_XWR || cmd === M_XSC || isAMO(cmd)
   def isWriteIntent(cmd: UInt) = isWrite(cmd) || cmd === M_PFW || cmd === M_XLR
-}
-
-object CSR
-{
-  // commands
-  val SZ = 3
-  val X = BitPat.DC(SZ)
-  val N = UInt(0,SZ)
-  val W = UInt(1,SZ)
-  val S = UInt(2,SZ)
-  val C = UInt(3,SZ)
-  val I = UInt(4,SZ)
-  val R = UInt(5,SZ)
 }

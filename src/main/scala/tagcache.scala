@@ -3,14 +3,15 @@
 package uncore
 import Chisel._
 import junctions._
+import cde.{Parameters, Field}
+//import scala.collection.immutable.::
+//import scala.math._
 
-import scala.collection.immutable.::
-import scala.math._
-
-//--------------------------------------------------------------//
-// parameter definitions
-//--------------------------------------------------------------//
-
+case object TagBits extends Field[Int]
+case object TCBlockBits extends Field[Int]
+case object TCBlockTags extends Field[Int]
+case object TCTransactors extends Field[Int]
+case object TCBaseAddr extends Field[Int]
 
 abstract trait TagCacheParameters extends UsesParameters {
 
@@ -126,6 +127,12 @@ class TagCacheDataRWIO extends Bundle {
   val write = Decoupled(new TagCacheDataWriteReq)
   val resp = Valid(new TagCacheDataResp).flip
 }
+
+//class TagCache(implicit val p: Parameters) extends Module {
+//  val io = new Bundle {
+//    val inner = new ManagerTileLinkIO
+//    val mem = new MemIO
+//  }
 
 class TagCache extends TagCacheModule {
   val io = new Bundle {

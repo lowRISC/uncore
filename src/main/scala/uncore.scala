@@ -2,27 +2,44 @@
 
 package uncore
 import Chisel._
+import cde.{Parameters, Field}
 
-trait CoherenceAgentParameters extends UsesParameters {
+case object NReleaseTransactors extends Field[Int]
+case object NProbeTransactors extends Field[Int]
+case object NAcquireTransactors extends Field[Int]
+
+/** Identifies the TLId of the inner network in a hierarchical cache controller */ 
+case object InnerTLId extends Field[String]
+/** Identifies the TLId of the outer network in a hierarchical cache controller */ 
+case object OuterTLId extends Field[String]
+
+trait HasCoherenceAgentParameters {
+  implicit val p: Parameters
   val nReleaseTransactors = 1
-  val nAcquireTransactors = params(NAcquireTransactors)
+  val nAcquireTransactors = p(NAcquireTransactors)
   val nTransactors = nReleaseTransactors + nAcquireTransactors
-  val outerTLParams = params.alterPartial({ case TLId => params(OuterTLId)})
-  val outerDataBeats = outerTLParams(TLDataBeats)
-  val outerDataBits = outerTLParams(TagTLDataBits)
+  val outerTLId = p(OuterTLId)
+  val outerTLParams = p(TLKey(outerTLId))
+  val outerDataBeats = outerTLParams.dataBeats
+  val outerDataBits = outerTLParams.dataBitsPerBeat
   val outerBeatAddrBits = log2Up(outerDataBeats)
   val outerByteAddrBits = log2Up(outerDataBits/8)
-  val innerTLParams = params.alterPartial({case TLId => params(InnerTLId)})
-  val innerDataBeats = innerTLParams(TLDataBeats)
-  val innerDataBits = innerTLParams(TagTLDataBits)
-  val innerWriteMaskBits = innerTLParams(TLWriteMaskBits)
+  val outerWriteMaskBits = outerTLParams.writeMaskBits
+  val innerTLId = p(InnerTLId)
+  val innerTLParams = p(TLKey(innerTLId))
+  val innerDataBeats = innerTLParams.dataBeats
+  val innerDataBits = innerTLParams.dataBitsPerBeat
+  val innerWriteMaskBits = innerTLParams.writeMaskBits
   val innerBeatAddrBits = log2Up(innerDataBeats)
   val innerByteAddrBits = log2Up(innerDataBits/8)
-  require(outerDataBeats == innerDataBeats) //TODO: must fix all xact_data Vecs to remove this requirement
+  val maxManagerXacts = innerTLParams.maxManagerXacts
+  require(outerDataBeats == innerDataBeats) //TODO: fix all xact_data Vecs to remove this requirement
 }
 
-abstract class CoherenceAgentBundle extends Bundle with CoherenceAgentParameters
-abstract class CoherenceAgentModule extends Module with CoherenceAgentParameters
+abstract class CoherenceAgentModule(implicit val p: Parameters) extends Module
+  with HasCoherenceAgentParameters
+abstract class CoherenceAgentBundle(implicit val p: Parameters) extends junctions.ParameterizedBundle()(p)
+   with HasCoherenceAgentParameters
 
 trait HasCoherenceAgentWiringHelpers {
   def doOutputArbitration[T <: TileLinkChannel](
@@ -34,7 +51,7 @@ trait HasCoherenceAgentWiringHelpers {
     arb.io.in <> ins
   }
 
-  def doInputRouting[T <: HasManagerTransactionId](
+  def doInputRouting[T <: Bundle with HasManagerTransactionId](
         in: DecoupledIO[T],
         outs: Seq[DecoupledIO[T]]) {
     val idx = in.bits.manager_xact_id
@@ -42,12 +59,45 @@ trait HasCoherenceAgentWiringHelpers {
     outs.zipWithIndex.map { case (o,i) => o.valid := in.valid && idx === UInt(i) }
     in.ready := Vec(outs.map(_.ready)).read(idx)
   }
+
+  /** Broadcasts valid messages on this channel to all trackers,
+    * but includes logic to allocate a new tracker in the case where
+    * no previously allocated tracker matches the new req's addr.
+    *
+    * When a match is reported, if ready is high the new transaction
+    * is merged; when ready is low the transaction is being blocked.
+    * When no match is reported, any high readys are presumed to be
+    * from trackers that are available for allocation, and one is
+    * assigned via alloc based on priority; f no readys are high then
+    * all trackers are busy with other transactions.
+    */ 
+  def doInputRoutingWithAllocation[T <: TileLinkChannel with HasTileLinkData](
+        in: DecoupledIO[T],
+        outs: Seq[DecoupledIO[T]],
+        matches: Seq[Bool],
+        allocs: Seq[Bool],
+        dataOverrides: Option[Seq[UInt]] = None,
+        allocOverride: Option[Bool] = None,
+        matchOverride: Option[Bool] = None) {
+    val ready_bits = Vec(outs.map(_.ready)).toBits
+    val alloc_bits = PriorityEncoderOH(ready_bits)
+    val match_bits = Vec(matches).toBits
+    val no_matches = !match_bits.orR
+    val alloc_ok = allocOverride.getOrElse(Bool(true))
+    val match_ok = matchOverride.getOrElse(Bool(true))
+    in.ready := Mux(no_matches, ready_bits.orR, (match_bits & ready_bits).orR) && alloc_ok && match_ok
+    outs.zip(allocs).zipWithIndex.foreach { case((out, a), i) =>
+      out.valid := in.valid && match_ok
+      out.bits := in.bits
+      dataOverrides foreach { d => out.bits.data := d(i) }
+      a := alloc_bits(i) & no_matches & alloc_ok
+    }
+  }
 }
 
-trait HasInnerTLIO extends CoherenceAgentBundle {
-  val inner = Bundle(new ManagerTileLinkIO)(innerTLParams)
-  val incoherent = Vec(Bool(), inner.tlNCachingClients).asInput
-  val soft_reset = Bool(INPUT)
+trait HasInnerTLIO extends HasCoherenceAgentParameters {
+  val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => p(InnerTLId)}))
+  val incoherent = Vec(inner.tlNCachingClients, Bool()).asInput
   def iacq(dummy: Int = 0) = inner.acquire.bits
   def iprb(dummy: Int = 0) = inner.probe.bits
   def irel(dummy: Int = 0) = inner.release.bits
@@ -55,65 +105,87 @@ trait HasInnerTLIO extends CoherenceAgentBundle {
   def ifin(dummy: Int = 0) = inner.finish.bits
 }
 
-trait HasUncachedOuterTLIO extends CoherenceAgentBundle {
-  val outer = Bundle(new ClientUncachedTileLinkIO)(outerTLParams)
+trait HasUncachedOuterTLIO extends HasCoherenceAgentParameters {
+  val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => p(OuterTLId)}))
   def oacq(dummy: Int = 0) = outer.acquire.bits
   def ognt(dummy: Int = 0) = outer.grant.bits
 }
 
-trait HasCachedOuterTLIO extends CoherenceAgentBundle {
-  val outer = Bundle(new ClientTileLinkIO)(outerTLParams)
+trait HasCachedOuterTLIO extends HasCoherenceAgentParameters {
+  val outer = new ClientTileLinkIO()(p.alterPartial({case TLId => p(OuterTLId)}))
   def oacq(dummy: Int = 0) = outer.acquire.bits
   def oprb(dummy: Int = 0) = outer.probe.bits
   def orel(dummy: Int = 0) = outer.release.bits
   def ognt(dummy: Int = 0) = outer.grant.bits
 }
 
-class ManagerTLIO extends HasInnerTLIO with HasUncachedOuterTLIO
+class ManagerTLIO(implicit p: Parameters) extends CoherenceAgentBundle()(p)
+  with HasInnerTLIO
+  with HasUncachedOuterTLIO
 
-abstract class CoherenceAgent extends CoherenceAgentModule {
+abstract class CoherenceAgent(implicit p: Parameters) extends CoherenceAgentModule()(p) {
   def innerTL: ManagerTileLinkIO
   def outerTL: ClientTileLinkIO
   def incoherent: Vec[Bool]
 }
 
-abstract class ManagerCoherenceAgent extends CoherenceAgent
+abstract class ManagerCoherenceAgent(implicit p: Parameters) extends CoherenceAgent()(p)
     with HasCoherenceAgentWiringHelpers {
   val io = new ManagerTLIO
   def innerTL = io.inner
-  def outerTL = TileLinkIOWrapper(io.outer, outerTLParams)
+  lazy val outerTL = TileLinkIOWrapper(io.outer)(p.alterPartial({case TLId => p(OuterTLId)}))
   def incoherent = io.incoherent
 }
 
-class HierarchicalTLIO extends HasInnerTLIO with HasCachedOuterTLIO
+class HierarchicalTLIO(implicit p: Parameters) extends CoherenceAgentBundle()(p)
+  with HasInnerTLIO
+  with HasCachedOuterTLIO
 
-abstract class HierarchicalCoherenceAgent extends CoherenceAgent {
+abstract class HierarchicalCoherenceAgent(implicit p: Parameters) extends CoherenceAgent()(p) {
   val io = new HierarchicalTLIO
   def innerTL = io.inner
   def outerTL = io.outer
   def incoherent = io.incoherent
 }
 
-trait HasTrackerConflictIO extends Bundle {
-  val has_acquire_conflict = Bool(OUTPUT)
-  val has_acquire_match = Bool(OUTPUT)
-  val has_release_match = Bool(OUTPUT)
+trait HasTrackerAllocationIO extends Bundle {
+  val matches = new Bundle {
+    val iacq = Bool(OUTPUT)
+    val irel = Bool(OUTPUT)
+    val oprb = Bool(OUTPUT)
+  }
+  val alloc = new Bundle {
+    val iacq = Bool(INPUT)
+    val irel = Bool(INPUT)
+    val oprb = Bool(INPUT)
+  }
 }
 
-class ManagerXactTrackerIO extends ManagerTLIO with HasTrackerConflictIO
-class HierarchicalXactTrackerIO extends HierarchicalTLIO with HasTrackerConflictIO
+class ManagerXactTrackerIO(implicit p: Parameters) extends ManagerTLIO()(p)
+  with HasTrackerAllocationIO
 
-abstract class XactTracker extends CoherenceAgentModule with HasDataBeatCounters {
+class HierarchicalXactTrackerIO(implicit p: Parameters) extends HierarchicalTLIO()(p)
+  with HasTrackerAllocationIO
+
+abstract class XactTracker(implicit p: Parameters) extends CoherenceAgentModule()(p)
+    with HasDataBeatCounters {
   def addPendingBitWhenBeat[T <: HasBeat](inc: Bool, in: T): UInt =
     Fill(in.tlDataBeats, inc) &  UIntToOH(in.addr_beat)
+
   def dropPendingBitWhenBeat[T <: HasBeat](dec: Bool, in: T): UInt =
     ~Fill(in.tlDataBeats, dec) | ~UIntToOH(in.addr_beat)
 
-  def addPendingBitWhenBeatHasData[T <: HasBeat](in: DecoupledIO[T]): UInt =
-    addPendingBitWhenBeat(in.fire() && in.bits.hasData(), in.bits)
+  def addPendingBitWhenId[T <: HasClientId](inc: Bool, in: T): UInt =
+    Fill(in.tlNCachingClients, inc) &  UIntToOH(in.client_id)
+
+  def dropPendingBitWhenId[T <: HasClientId](dec: Bool, in: T): UInt =
+    ~Fill(in.tlNCachingClients, dec) | ~UIntToOH(in.client_id)
+
+  def addPendingBitWhenBeatHasData[T <: HasBeat](in: DecoupledIO[T], inc: Bool = Bool(true)): UInt =
+    addPendingBitWhenBeat(in.fire() && in.bits.hasData() && inc, in.bits)
 
   def addPendingBitWhenBeatHasDataAndAllocs(in: DecoupledIO[AcquireFromSrc]): UInt =
-    addPendingBitWhenBeat(in.fire() && in.bits.hasData() && in.bits.allocate(), in.bits)
+    addPendingBitWhenBeatHasData(in, in.bits.allocate())
 
   def addPendingBitWhenBeatIsGetOrAtomic(in: DecoupledIO[AcquireFromSrc]): UInt = {
     val a = in.bits
@@ -122,9 +194,34 @@ abstract class XactTracker extends CoherenceAgentModule with HasDataBeatCounters
     addPendingBitWhenBeat(in.fire() && isGetOrAtomic, a)
   }
 
+  def addPendingBitsFromAcquire(a: SecondaryMissInfo): UInt =
+    Mux(a.hasMultibeatData(), Fill(a.tlDataBeats, UInt(1, 1)), UIntToOH(a.addr_beat))
+
   def dropPendingBitWhenBeatHasData[T <: HasBeat](in: DecoupledIO[T]): UInt =
     dropPendingBitWhenBeat(in.fire() && in.bits.hasData(), in.bits)
 
-  def dropPendingBitAtDest(in: DecoupledIO[ProbeToDst]): UInt =
-    ~Fill(in.bits.tlNCachingClients, in.fire()) | ~UIntToOH(in.bits.client_id)
+  def dropPendingBitAtDest[T <: HasId](in: DecoupledIO[T]): UInt =
+    dropPendingBitWhenId(in.fire(), in.bits)
+
+  def dropPendingBitAtDestWhenVoluntary[T <: HasId with MightBeVoluntary](in: DecoupledIO[T]): UInt =
+    dropPendingBitWhenId(in.fire() && in.bits.isVoluntary(), in.bits)
+
+  def addPendingBitAtSrc[T <: HasId](in: DecoupledIO[T]): UInt =
+    addPendingBitWhenId(in.fire(), in.bits)
+
+  def addPendingBitAtSrcWhenVoluntary[T <: HasId with MightBeVoluntary](in: DecoupledIO[T]): UInt =
+    addPendingBitWhenId(in.fire() && in.bits.isVoluntary(), in.bits)
+
+  def pinAllReadyValidLow[T <: Data](b: Bundle) {
+    b.elements.foreach {
+      _._2 match {
+        case d: DecoupledIO[_] =>
+          if(d.ready.dir == OUTPUT) d.ready := Bool(false)
+          else if(d.valid.dir == OUTPUT) d.valid := Bool(false)
+        case v: ValidIO[_] => if(v.valid.dir == OUTPUT) v.valid := Bool(false) 
+        case b: Bundle => pinAllReadyValidLow(b)
+        case _ =>
+      }
+    }
+  }
 }
