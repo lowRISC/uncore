@@ -15,6 +15,7 @@ case object TCTransactors extends Field[Int]
 abstract trait HasTagParameters {
   implicit val p: Parameters
   val tgBits = p(TagBits)                               // the number of bits in each tag
+  val useTagMem = p(UseTagMem)
   val tgMapRatio = p(TagMapRatio)                       // the ratio of memory bytes to 1 bit in the bit map
   val tgHelper = TagUtil(tgBits)                        // tag helper functions
 
@@ -75,13 +76,22 @@ class TagUtil(tagBits: Int) {
   }
 
   // insert corresponding write mask for tags
-  def insertTagMask(mask: UInt): UInt = {
+  def insertTagMaskAuto(mask: UInt): UInt = {
     require(mask.getWidth >= wordBytes && mask.getWidth % wordBytes == 0)
     val words = mask.getWidth / wordBytes
     (0 until words).map( i => {
       val wordMask = mask(i*wordBytes + wordBytes - 1, i*wordBytes)
       // write tag if any byte of the word is written
       Cat(wordMask.orR, wordMask)
+    }).toBits
+  }
+
+  // insert rite mask for tags
+  def insertTagMask(mask: UInt, tgMask: Bool = Bool(false)): UInt = {
+    require(mask.getWidth >= wordBytes && mask.getWidth % wordBytes == 0)
+    val words = mask.getWidth / wordBytes
+    (0 until words).map( i => {
+      Cat(tagMask, mask(i*wordBytes + wordBytes - 1, i*wordBytes))
     }).toBits
   }
 
