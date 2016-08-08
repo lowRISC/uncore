@@ -34,6 +34,7 @@ case class TileLinkParameters(
     maxManagerXacts: Int,
     dataBits: Int,
     dataBeats: Int = 4,
+    withTag: Boolean = false,
     overrideDataBitsPerBeat: Option[Int] = None
     ) {
   val nClients = nCachingClients + nCachelessClients
@@ -43,9 +44,9 @@ case class TileLinkParameters(
 
   
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
-trait HasTileLinkParameters {
-  implicit val p: Parameters
+trait HasTileLinkParameters extends HasTagParameters{
   val tlExternal = p(TLKey(p(TLId)))
+  val tlTagged = tlExternal.withTag
   val tlCoh = tlExternal.coherencePolicy
   val tlNManagers = tlExternal.nManagers
   val tlNCachingClients = tlExternal.nCachingClients
@@ -59,11 +60,13 @@ trait HasTileLinkParameters {
   val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort) + log2Up(tlNClients) // lost id in Uncached crossabr
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
   val tlDataBeats = tlExternal.dataBeats
-  val tlDataBits = tlExternal.dataBitsPerBeat
-  val tlDataBytes = tlDataBits/8
-  val tlWriteMaskBits = tlExternal.writeMaskBits
+  val tlDataBits = if(tlTagged) tgHelper.sizeWithTag(tlExternal.dataBitsPerBeat)
+                   else         tlExternal.dataBitsPerBeat
+  val tlDataBytes = tlExternal.dataBitsPerBeat/8             // ATTN: bytes of data without tag 
+  val tlWriteMaskBits = if(tlTagged) tgHelper.maskSizeWithTag(tlExternal.writeMaskBits)
+                        else         tlExternal.writeMaskBits
   val tlBeatAddrBits = log2Up(tlDataBeats)
-  val tlByteAddrBits = log2Up(tlWriteMaskBits)
+  val tlByteAddrBits = log2Up(tlExternal.writeMaskBits)
   val tlBlockOffsetBits = tlByteAddrBits + (if (tlDataBeats > 1) tlBeatAddrBits else 0)
   val tlBlockAddrBits = p(PAddrBits) - tlBlockOffsetBits
   val tlMemoryOpcodeBits = M_SZ

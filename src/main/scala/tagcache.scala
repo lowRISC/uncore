@@ -2,12 +2,40 @@
 
 package uncore
 import Chisel._
-import junctions._
 import cde.{Parameters, Field}
+import junctions.ParameterizedBundle
 
 trait HasTagCacheParameters extends HasTagParameters with HasCacheParameters {
+  val nTransactors = p(TCTransactors)
+  val outerTLId = p(OuterTLId)
+  val outerTLParams = p(TLKey(outerTLId))
+  val outerDataBeats = outerTLParams.dataBeats
+  val outerDataBits = outerTLParams.dataBitsPerBeat
+  val outerBeatAddrBits = log2Up(outerDataBeats)
+  val outerByteAddrBits = log2Up(outerDataBits/8)
+  val outerWriteMaskBits = outerTLParams.writeMaskBits
+  val innerTLId = p(InnerTLId)
+  val innerTLParams = p(TLKey(innerTLId))
+  val innerDataBeats = innerTLParams.dataBeats
+  val innerDataBits = tgHelper.sizeWithTag(innerTLParams.dataBitsPerBeat)
+  val innerWriteMaskBits = tgHelper.maskSizeWithTag(innerTLParams.writeMaskBits)
+  val innerBeatAddrBits = log2Up(innerDataBeats)
+  val innerByteAddrBits = log2Up(innerTLParams.dataBitsPerBeat/8)
 
+  val refillCyclesPerBeat = outerDataBits/rowBits
+  val refillCycles = refillCyclesPerBeat*tlDataBeats
 
+  // tag cache
+  val tcTagBits = tagBits - tgHelper.unTagBits
+  val tcDataBits = p(CacheBlockBytes) / 8 * tgBits
+  val tcStrbBits = p(CacheBlockBytes) / 8
+
+  // tag map
+  val tmTagBits = tagBits - tgHelper.unTagBits - tgHelper.unMapBits
+
+  require(tcDataBits <= rowBits) // limit the size of tag to wordBits / outerDataBeats
+  require(!outerTLParams.tlTagged && innerTLParams.tlTagged)
+  require(outerTLId == p(TLId))
 }
 
 
@@ -31,70 +59,85 @@ trait HasTagCacheParameters extends HasTagParameters with HasCacheParameters {
 
 }
 
-// deriving classes from parameters
-abstract trait TagCacheModule extends Module with TagCacheParameters
+abstract class TagCacheModule(implicit val p: Parameters) extends Module
+  with HasTagCacheParameters
+abstract class TagCacheBundle(implicit val p: Parameters) extends ParameterizedBundle()(p)
+  with HasTagCacheParameters
 
-//----------------------------------------------------//
-// I/O definitions
-//--------------------------------------------------------------//
-trait TagCacheId extends Bundle with TagCacheParameters        { val id = UInt(width  = log2Up(nTrackers)) }
-trait TagCacheMetadata extends Bundle with TagCacheParameters  { val tag = Bits(width = tagCacheTagBits + 2 + 1) }
-trait TagCacheIdx extends Bundle with TagCacheParameters       { val idx = Bits(width = tagCacheIdxBits) }
-trait TagCacheHit extends Bundle with TagCacheParameters       { val hit = Bool() }
+trait TagXactId extends HasTagCacheParameters        { val id   = UInt(width  = log2Up(nTransactors)) }
+trait TagCacheMetadata extends HasTagCacheParameters { val tag  = UInt(width = tcTagBits) }
+trait TagCacheIdx extends HasTagCacheParameters      { val idx  = UInt(width = idxBits) }
+trait TagCacheWay extends HasTagCacheParameters      { val way  = UInt(width = nWays) }
+trait TagCacheData extends HasTagCacheParameters     { val data = UInt(width = tcDataBits) }
+trait TagCacheStrb extends HasTagCacheParameters     { val strb = UInt(width = tcStrbBits) }
+trait TagMapMetadata extends HasTagCacheParameters   { val tag  = UInt(width = tmTagBits) }
+trait TagMapData extends HasTagCacheParameters       { val flag = Bool }
 
-class TagCacheMetaReadReq extends TagCacheId with TagCacheMetadata with TagCacheIdx
+class TagCacheReadReq(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagXactId with TagCacheMetadata with TagCacheIdx
 
-class TagCacheMetaWriteReq extends TagCacheMetadata with TagCacheIdx {
-  val way_en = Bits(width = nWays)
+class TagCacheWriteReq(implicit p: Parameters) extends TagCacheReadReq()(p)
+  with TagCacheWay with TagCacheData with TagCacheStrb
+
+class TagCacheReadResp(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagXactId with TagCacheWay with TagCacheData
+
+class TagCacheIO(implicit p: Parameters) extends TagCacheBundle()(p)
+  val read = Decoupled(new TagCacheReadReq)
+  val write = Decoupled(new TagCacheWriteReq)
+  val resp = Valid(new TagCacheReadResp).flip
+
+  override def cloneType = new TagCacheIO().asInstanceOf[this.type]
 }
 
-class TagCacheMetaResp extends TagCacheId with TagCacheMetadata with TagCacheHit {
-  val way_en = Bits(width = nWays)
+class TagMapReadReq(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagXactId with TagMapMetadata with TagCacheIdx
+
+class TagMapWriteReq(implicit p: Parameters) extends TagCacheReadReq()(p)
+  with TagMapData
+
+class TagMapReadResp(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagXactId with TagMapData
+
+class TagMapIO(implicit p: Parameters) extends TagCacheBundle()(p)
+  val read = Decoupled(new TagMapReadReq)
+  val write = Decoupled(new TagMapWriteReq)
+  val resp = Valid(new TagMapReadResp).flip
+
+  override def cloneType = new TagMapIO().asInstanceOf[this.type]
 }
 
-class TagCacheMetaRWIO extends Bundle {
-  val read = Decoupled(new TagCacheMetaReadReq)
-  val write = Decoupled(new TagCacheMetaWriteReq)
-  val resp = Valid(new TagCacheMetaResp).flip
+class TagMap(implicit p: Parameters) extends TagCacheModule()(p) {
+  val io = new TagMapIO
+
+  // sequential
+  // stage based
 }
 
-trait TagCacheData extends Bundle with TagCacheParameters  {
-  val data = Bits(width = tagBlockTagBits * tagRowBlocks)
+class TagCache(implicit p: Parameters) extends TagCacheModule()(p) {
+  val io = new TagCacheIO
+
+  // parallel trackers
 }
 
-trait TagCacheAddr extends Bundle with TagCacheParameters {
-  val addr = Bits(width = tagCacheIdxBits + log2Up(tagBlockRows))
-}
-
-class TagCacheDataReadReq extends TagCacheId with TagCacheAddr {
-  val way_en = Bits(width = nWays)
-}
-
-class TagCacheDataWriteReq extends TagCacheData with TagCacheAddr {
-  val way_en = Bits(width = nWays)
-  val wmask = Bits(width = tagRowBlocks)
-}
-
-class TagCacheDataResp extends TagCacheId with TagCacheData
-
-class TagCacheDataRWIO extends Bundle {
-  val read = Decoupled(new TagCacheDataReadReq)
-  val write = Decoupled(new TagCacheDataWriteReq)
-  val resp = Valid(new TagCacheDataResp).flip
-}
-
-//class TagCache(implicit val p: Parameters) extends Module {
-//  val io = new Bundle {
-//    val inner = new ManagerTileLinkIO
-//    val mem = new MemIO
-//  }
-
-class TagCache extends TagCacheModule {
+class TagCacheManager(implicit p: Parameters) extends TagCacheModule()(p) {
   val io = new Bundle {
-    val tl = new ManagerTileLinkIO
-    val update = new ValidIO(new PCRUpdate).flip
-    val tl_out = new ClientUncachedTileLinkIO()
+    val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => innerTLId}))
+    val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => outerTLId}))
+    def iacq(dummy: Int = 0) = inner.acquire.bits
+    def iprb(dummy: Int = 0) = inner.probe.bits
+    def irel(dummy: Int = 0) = inner.release.bits
+    def ignt(dummy: Int = 0) = inner.grant.bits
+    def ifin(dummy: Int = 0) = inner.finish.bits
+    def oacq(dummy: Int = 0) = outer.acquire.bits
+    def ognt(dummy: Int = 0) = outer.grant.bits
   }
+}
+
+/////////////////////////////
+
+
+{
 
   val conv = Module(new MemSpaceConsts(2))
   conv.io.update <> io.update

@@ -8,33 +8,45 @@ import cde.{Parameters, Field}
 //import scala.math._
 
 case object UseTagMem extends Field[Boolean]
-case object TagMapRatio extends Field[BigInt]
+case object TagMapBits extends Field[Int]
 case object TagBits extends Field[Int]
 case object TCTransactors extends Field[Int]
 
 abstract trait HasTagParameters {
   implicit val p: Parameters
   val tgBits = p(TagBits)                               // the number of bits in each tag
+  val tgMapBits = p(TagMapBits)                         // the number of bits in each tag map element
   val useTagMem = p(UseTagMem)
-  val tgMapRatio = p(TagMapRatio)                       // the ratio of memory bytes to 1 bit in the bit map
-  val tgHelper = TagUtil(tgBits)                        // tag helper functions
 
-  val tgMapSize = tgHelper.minMapSize(p(RAMSize), tgMapRatio) // the size of the tag bit map
-  val tgMemSize = tgHelper.minCacheSize(p(RAMSize)) + tgMapSize // the size of the tag memory partition
-  val tgBaseAddr =                                      // the base address of the tag partition
-    p(GlobalAddrHashMap)("mem").start + p(RAMSize) - tgMemSize
-  val tgMapAddr =                                       // the base address of the tag bit map
-    p(GlobalAddrHashMap)("mem").start + p(RAMSize) - tgMapSize
-
+  val tgHelper = TagUtil(tgBits, tgMapBits,
+    p(RAMSize), p(GlobalAddrHashMap)("mem").start,
+    p(CacheBlockBytes))                                 // tag helper functions
 }
 
 // support for tagged memory
-class TagUtil(tagBits: Int) {
+class TagUtil(
+  tagBits: Int,                 // size of tag for each word
+  mapBits: Int,                 // bit size of each element in tag map
+  memSize: BigInt,              // size of tagged memory
+  memBase: BigInt,              // base address of tagged memory
+  cacheBlockBytes: Int = 64     // byte size of a cache block 
+) {
   def wordBits = 64                                     // add tag to every 64-bit word
   def wordBytes = wordBits / 8
   def tagWordBits = wordBits + tagBits                  // total size of tagged word
   def normTagBits = 1 << log2Up(tagBits)                // normalized tag bits (around up to the nears 2's power)
   def tagRatio = wordBits / normTagBits                 // tag compression ratio
+  def unTagBits = log2Up(tagRatio)                      // offset bits to get tag address
+  def mapRatio = (1 << (mapBits-1)) * cacheBlockBytes * 8 / mapBits
+                                                        // map compression ratio
+  def unMapBits = log2Up(mapRatio)                      // offset bits to get map address
+  def cacheSize = memSize / tagRaio                     // size of tag cache
+  def cacheBase = memBase + memSize - cacheSize         // base address of tag cache
+  def mapSize = cacheSize / mapRatio                    // size of tag map
+  def mapBase = memBase + memSize - mapSize             // base address of tag map
+
+  require(isPow2(elemBits))                             // easy for address caclculation
+  require(mapRatio > tagRatio)                          // no extra space for map 
 
   // remove the tags from a data line
   def removeTag(data: UInt): UInt = {
@@ -123,19 +135,25 @@ class TagUtil(tagBits: Int) {
     s / tagWordBits * wordBits
   }
 
+  // calculate the extended mask size with tags
+  def maskSizeWithTag(s: Int): Int = {
+    require(s >= wordBytes && s % wordBytes == 0)
+    s / wordByte * (wordBytes + 1)
+  }
+
+  // calculate the mask size without tags
+  def maskSizeWithoutTag(s: Int): Int = {
+    require(s >= wordBytes + 1 && s % (wordBytes + 1) == 0)
+    s / (wordBytes + 1) * wordBytes
+  }
+
   // convert physical address to tag address
-  def pa2ta(addr: UInt): UInt = addr >> log2Up(tagRaio)
+  def pa2ta(addr: UInt): UInt = (addr >> unTagBits) + tagBase
 
-  // convert physical address to bitmap address
-  def pa2ba(addr: UInt): UInt = addr >> log2Up(tagMapRatio * 8)
+  // convert physical address to map address
+  def pa2ma(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + mapBase
 
-  // convert tag address to bitmap address
-  def ta2ba(addr: UInt): UInt = addr >> (log2Up(tagMapRatio * 8) - log2Up(tagRaio))
-
-  // calculate the minimal tag bit map size
-  def minMapSize(mem: BigInt, tagMapRatio: BigInt) = mem / tagMapRatio / 8
-
-  // calculate the minimal tag cache size
-  def minCacheSize(mem: BigInt) = mem / tagRaio
+  // convert tag address to map address
+  def ta2ma(addr: UInt): UInt = (addr >> unMapBits) + mapBase
 
 }
