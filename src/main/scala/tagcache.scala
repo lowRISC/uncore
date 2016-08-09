@@ -5,8 +5,12 @@ import Chisel._
 import cde.{Parameters, Field}
 import junctions.ParameterizedBundle
 
+case object TCMemTransactors   extends Field[Int]
+case object TCCacheTransactors extends Field[Int]
+
 trait HasTagCacheParameters extends HasTagParameters with HasCacheParameters {
-  val nTransactors = p(TCTransactors)
+  val nMemTransactors   = p(TCMemTransactors)
+  val nCacheTransactors = p(TCCTransactors)
   val outerTLId = p(OuterTLId)
   val outerTLParams = p(TLKey(outerTLId))
   val outerDataBeats = outerTLParams.dataBeats
@@ -25,17 +29,13 @@ trait HasTagCacheParameters extends HasTagParameters with HasCacheParameters {
   val refillCyclesPerBeat = outerDataBits/rowBits
   val refillCycles = refillCyclesPerBeat*tlDataBeats
 
-  // tag cache
   val tcTagBits = tagBits - tgHelper.unTagBits
-  val tcDataBits = p(CacheBlockBytes) / 8 * tgBits
-  val tcStrbBits = p(CacheBlockBytes) / 8
-
-  // tag map
   val tmTagBits = tagBits - tgHelper.unTagBits - tgHelper.unMapBits
 
   require(tcDataBits <= rowBits) // limit the size of tag to wordBits / outerDataBeats
   require(!outerTLParams.tlTagged && innerTLParams.tlTagged)
   require(outerTLId == p(TLId))
+  require(p(CacheBlockBytes) >= 64)
 }
 
 
@@ -64,58 +64,106 @@ abstract class TagCacheModule(implicit val p: Parameters) extends Module
 abstract class TagCacheBundle(implicit val p: Parameters) extends ParameterizedBundle()(p)
   with HasTagCacheParameters
 
-trait TagXactId extends HasTagCacheParameters        { val id   = UInt(width  = log2Up(nTransactors)) }
-trait TagCacheMetadata extends HasTagCacheParameters { val tag  = UInt(width = tcTagBits) }
-trait TagCacheIdx extends HasTagCacheParameters      { val idx  = UInt(width = idxBits) }
-trait TagCacheWay extends HasTagCacheParameters      { val way  = UInt(width = nWays) }
-trait TagCacheData extends HasTagCacheParameters     { val data = UInt(width = tcDataBits) }
-trait TagCacheStrb extends HasTagCacheParameters     { val strb = UInt(width = tcStrbBits) }
-trait TagMapMetadata extends HasTagCacheParameters   { val tag  = UInt(width = tmTagBits) }
-trait TagMapData extends HasTagCacheParameters       { val flag = Bool }
+trait TagCacheIdx extends HasTagCacheParameters      { val idx    = UInt(width = idxBits) }
+trait TagCacheWay extends HasTagCacheParameters      { val way_en = UInt(width = nWays) }
+trait TagCacheHit extends HasTagCacheParameters      { val hit    = Bool() }
+trait TagCacheRow extends HasTagCacheParameters      { val row    = UInt(width = log2Up(refillCycles)) }
+trait TagCacheData extends HasTagCacheParameters     { val data   = UInt(width = rowBits) }
+trait TagCacheMask extends HasTagCacheParameters     { val mask   = UInt(width = rowBytes) }
 
-class TagCacheReadReq(implicit p: Parameters) extends TagCacheBundle()(p)
-  with TagXactId with TagCacheMetadata with TagCacheIdx
-
-class TagCacheWriteReq(implicit p: Parameters) extends TagCacheReadReq()(p)
-  with TagCacheWay with TagCacheData with TagCacheStrb
-
-class TagCacheReadResp(implicit p: Parameters) extends TagCacheBundle()(p)
-  with TagXactId with TagCacheWay with TagCacheData
-
-class TagCacheIO(implicit p: Parameters) extends TagCacheBundle()(p)
-  val read = Decoupled(new TagCacheReadReq)
-  val write = Decoupled(new TagCacheWriteReq)
-  val resp = Valid(new TagCacheReadResp).flip
-
-  override def cloneType = new TagCacheIO().asInstanceOf[this.type]
+abstract TagMetadata(implicit val p: Parameters) extends TagCacheBundle()(p) {
+  val valid = Bool
 }
 
-class TagMapReadReq(implicit p: Parameters) extends TagCacheBundle()(p)
-  with TagXactId with TagMapMetadata with TagCacheIdx
+class TCMetadata(implicit p: Parameters) extends TagMetadata()(p) {
+  val tagged = Bool
+  val tag = UInt(width = tcTagBits)
+  override def cloneType = new TCMetadata().asInstanceOf[this.type]
+}
 
-class TagMapWriteReq(implicit p: Parameters) extends TagCacheReadReq()(p)
-  with TagMapData
+object TCMetadata {
+  def apply(tag:UInt, tagged:Bool = Bool(false), valid:Bool = Bool(false))(implicit p: Parameters) = {
+    val meta = Wire(new TCMetadata)
+    meta.valid := valid
+    meta.tag := tag
+    meta.tagged := tagged
+  }
+}
 
-class TagMapReadResp(implicit p: Parameters) extends TagCacheBundle()(p)
-  with TagXactId with TagMapData
+class TMMetadata(implicit p: Parameters) extends TagMetadata()(p) {
+  val tag = UInt(width = tmTagBits)
+  override def cloneType = new TMMetadata().asInstanceOf[this.type]
+}
 
-class TagMapIO(implicit p: Parameters) extends TagCacheBundle()(p)
-  val read = Decoupled(new TagMapReadReq)
-  val write = Decoupled(new TagMapWriteReq)
-  val resp = Valid(new TagMapReadResp).flip
+object TMMetadata {
+  def apply(tag:UInt, valid:Bool = Bool(false))(implicit p: Parameters) = {
+    val meta = Wire(new TMMetadata)
+    meta.valid := valid
+    meta.tag := tag
+  }
+}
 
-  override def cloneType = new TagMapIO().asInstanceOf[this.type]
+class TagCacheMetadata[T <: TagMetadata](gen: T)(implicit p: Parameters)
+  extends TagMetadata()(p) {
+  val meta = gen.cloneType
+  override def cloneType = new TagCacheMetadata(gen)(p).asInstanceOf[this.type]
+}
+
+class TagCacheMetaReadReq[T <: TagMetadata](implicit p: Parameters) extends TagCacheBundle()(p)
+   with TagCacheIdx with TagCacheMetadata[T]
+
+class TagCacheMetaWriteReq[T <: TagMetadata](implicit p: Parameters) extends TagCacheMetaReadReq[T]()(p)
+  with TagCacheWay
+
+class TagCacheMetaReadResp[T <: TagMetadata](implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagCacheMetadata[T] with TagCacheWay with TagCacheHit
+
+class TagCacheMetaIO[T <: TagMetadata](implicit p: Parameters) extends TagCacheBundle()(p) {
+  val read = Decoupled(new TagCacheMetaReadReq)
+  val write = Decoupled(new TagCacheMetaWriteReq)
+  val resp = Valid(new TagCacheMetaReadResp).flip
+
+  override def cloneType = new TagCacheMetaIO().asInstanceOf[this.type]
+}
+
+class TagCacheDataReadReq(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagCacheIdx with TagCacheWay with TagCacheRow
+
+class TagCacheDataWriteReq(implicit p: Parameters) extends TagCacheDataReadReq[T]()(p)
+  with TagCacheData
+
+class TagCacheDataReadResp(implicit p: Parameters) extends TagCacheBundle()(p)
+  with TagCacheData
+
+class TagCacheDataIO(implicit p: Parameters) extends TagCacheBundle()(p) {
+  val read = Decoupled(new TagCacheDataReadReq)
+  val write = Decoupled(new TagCacheDataWriteReq)
+  val resp = Valid(new TagCacheDataReadResp).flip
+
+  override def cloneType = new TagCacheDataIO().asInstanceOf[this.type]
+}
+
+class TagMapReq(implicit p: Parameters) extends TagCacheBundle()(p) {
+  val rw = Bool()
+  val addr = UInt(width = p(PAddrBits))
+  val tagged = Bool()
+}
+
+class TagMapResp(implicit p: Parameters) extends TagCacheBundle()(p) {
+  val tagged = Bool()
 }
 
 class TagMap(implicit p: Parameters) extends TagCacheModule()(p) {
-  val io = new TagMapIO
+  val io = new Bundle {
+    val req = Decoupled(new TagMapReq).flip
+    val resp = Valid(new TagMapResp)
+    val tl = new ClientUncachedTileLinkIO
+  }
 
-  // sequential
-  // stage based
 }
 
 class TagCache(implicit p: Parameters) extends TagCacheModule()(p) {
-  val io = new TagCacheIO
+  //val io = new TagCacheIO[TCMetadata]
 
   // parallel trackers
 }
@@ -138,17 +186,6 @@ class TagCacheManager(implicit p: Parameters) extends TagCacheModule()(p) {
 
 
 {
-
-  val conv = Module(new MemSpaceConsts(2))
-  conv.io.update <> io.update
-
-  conv.io.core_addr(0) := Mux(io.tl.acquire.bits.isBuiltInType(), io.tl.acquire.bits.full_addr(), io.tl.acquire.bits.addr_block << (tlBeatAddrBits + tlByteAddrBits))
-  conv.io.core_addr(1) := io.tl.release.bits.addr_block << (tlBeatAddrBits + tlByteAddrBits)
-
-  // coherecne
-  //val co = params(TLCoherence)
-  //def gntHasData(m: LogicalNetworkIO[Grant]) = co.messageHasData(m.payload)
-  //def acqHasData(m: LogicalNetworkIO[Acquire]) = co.messageHasData(m.payload)
 
   // cache data arrays
   val meta = Module(new TagCacheMetadataArray)
@@ -741,115 +778,107 @@ class TagCacheTracker(id: Int) extends TagCacheModule with NASTIParameters{
 
 
 // tag cache metadata array
-class TagCacheMetadataArray extends TagCacheModule {
-  val io = new TagCacheMetaRWIO().flip
-  // the highest bit in the meta is the valid flag
-  val meta_bits = tagCacheTagBits+2 + 1
+class TagCacheMetadataArray(implicit val p: Parameters) extends TagCacheModule()(p) {
+  val io = new TagCacheMetaIO[TCMetadata]().flip
 
-  val metaArray = SeqMem(Vec(UInt(width = meta_bits), nWays), nSets)
-
-  val replacer = new RandomReplacement(nWays)
-
-  // reset initial process
   val rst_cnt = Reg(init=UInt(0, log2Up(nSets+1)))
   val rst = rst_cnt < UInt(nSets)
-  val rst_0 = rst_cnt === UInt(0)
+  val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
+  val wdata = Mux(rst, TCMetadata(UInt(0)), io.write.bits.data)
+  val wmask = Mux(rst, SInt(-1), io.write.bits.way_en.toSInt).toBools
+  val rmask = Mux(rst, SInt(-1), io.read.bits.way_en.toSInt).toBools
   when (rst) { rst_cnt := rst_cnt+UInt(1) }
 
-  // write request
-  val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
-  val wdata = Mux(rst, UInt(0), io.write.bits.tag).toBits
-  val wmask = Mux(rst, SInt(-1), io.write.bits.way_en.toSInt()).toBools
+  val ren = io.read.fire()
+  val replacer = new RandomReplacement(nWays)
+  val tags_vec = Wire(Vec(nWays, new TCMetadata))
+  val tags_resp = Wire(Vec(nWays, Bool))
 
-  when (rst || (io.write.valid)) {
-    metaArray.write(waddr, Vec.fill(nWays)(wdata), wmask)
+  if (hasSplitMetadata) {
+    val tag_arrs = List.fill(nWays){ SeqMem(nSets, new TCMetadata) }
+    (0 until nWays).foreach { (i) =>
+      when (rst || (io.write.valid && wmask(i))) {
+        tag_arrs(i).write(waddr, wdata)
+      }
+      tags_vec(i) := tag_arrs(i).read(io.read.bits.idx, ren && rmask(i))
+      tags_resp(i) := tags_vec(i).valid && tags_vec(i).tag === s1_read_req.meta.tag
+    }
+  } else {
+    val tag_arr = SeqMem(nSets, Vec(nWays, new TCMetadata))
+    when (rst || io.write.valid) {
+      tag_arr.write(waddr, Vec.fill(nWays)(wdata), wmask)
+    }
+    tags_vec := tag_arr.read(io.read.bits.idx, ren)
+    (0 until nWays).foreach { (i) =>
+      tags_resp(i) := tags_vec(i).valid && tags_vec(i).tag === s1_read.meta.tag
+    }
   }
 
-  // helpers
-  def getTag(meta:Bits): Bits = meta(tagCacheTagBits-1,0)
-  def isValid(meta:Bits): Bool = meta(tagCacheTagBits+1)
-  def isDirty(meta:Bits): Bool = meta(tagCacheTagBits)
+  val s1_hit    = tags_resp.orR
+  val s1_way_en = Mux(s1_hit, tags_resp.toBits, UIntToOH(replacer.way))
+  val s1_meta   = Mux(s1_hit, tags_vec(OHToUInt(tags_resp.toBits)), tags_vec(replacer.way))
+  val s1_read_valid = Reg(next = ren)
 
-  // read from cache array
-  val ctags = metaArray.read(io.read.bits.idx, io.read.valid).toBits
-  val ctagArray = Vec((0 until nWays).map(i => ctags(UInt((i+1)*meta_bits - 1), UInt(i*meta_bits))))
+  when(!s1_hit && s1_read_valid) {replacer.miss}
 
-  // pipeline stage 1
-  val s1_tag = RegEnable(io.read.bits.tag, io.read.valid)
-  val s1_id = RegEnable(io.read.bits.id, io.read.valid)
-  val s1_clk_en = Reg(next = io.read.fire())
-  val s1_match_way = Vec((0 until nWays).map(i => (getTag(ctagArray(i)) === getTag(s1_tag) && isValid(ctagArray(i))))).toBits
-  val s1_match_meta = ctagArray(OHToUInt(s1_match_way))
-  val s1_hit = s1_match_way.orR()
-  val s1_replace_way = UIntToOH(replacer.way)
-  val s1_replace_meta = ctagArray(replacer.way)
-
-  // pipeline stage 2
-  val s2_match_way = RegEnable(s1_match_way, s1_clk_en)
-  val s2_match_meta = RegEnable(s1_match_meta, s1_clk_en)
-  val s2_hit = RegEnable(s1_hit, s1_clk_en)
-  val s2_replace_way = RegEnable(s1_replace_way, s1_clk_en)
-  val s2_replace_meta = RegEnable(s1_replace_meta, s1_clk_en)
-  when(!io.resp.bits.hit && io.resp.valid) {replacer.miss}
-
-  // response composition
-  io.resp.valid := Reg(next = s1_clk_en)
-  io.resp.bits.id := RegEnable(s1_id, s1_clk_en)
-  io.resp.bits.hit := s2_hit
-  io.resp.bits.way_en := Mux(s2_hit, s2_match_way, s2_replace_way)
-  io.resp.bits.tag := Mux(s2_hit, s2_match_meta, s2_replace_meta)
+  io.resp.valid       := Reg(next = s1_read_valid)
+  io.resp.bits.hit    := RegEnable(s1_hit,      s1_read_valid)
+  io.resp.bits.way_en := RegEnable(s1_way_en,   s1_read_valid)
+  io.resp.bits.meta   := RegEnable(s1_meta,     s1_read_valid)
 
   io.read.ready := !rst && !io.write.valid // so really this could be a 6T RAM
   io.write.ready := !rst
 }
 
 // tag cache data array
-class TagCacheDataArray extends TagCacheModule {
-  val io = new TagCacheDataRWIO().flip
+class TagCacheDataArray(implicit val p: Parameters) extends TagCacheModule()(p) {
+  val io = new TagCacheDataIO().flip
 
-  val waddr = io.write.bits.addr
-  val raddr = io.read.bits.addr
-  val wmask = io.write.bits.wmask.toBools
+  val array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
+  val ren = io.read.fire()
+  val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.idx, io.read.bits.row)
+  val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.idx, io.write.bits.row)
+  val wdata = Vec.tabulate(rowBytes)(i => io.write.bits.data(8*(i+1)-1,8*i))
+  val wmask = io.write.bits.mask.toBools
+  when (io.write.valid) { array.write(waddr, wdata, wmask) }
 
-  val resp = (0 until nWays).map { w =>
-    val array = SeqMem(nSets*refillCycles, Vec( tagRowBlocks, Bits(width = tagBlockTagBits )) )
+  val s1_data       = array.read(raddr, ren).toBits
+  val s1_read_valid = Reg(next = ren)
+ 
+  io.resp.valid     := Reg(next = s1_read_valid)
+  io.resp.bits.data := RegEnable(s1_data, s1_read_valid)
 
-    when (io.write.bits.way_en(w) && io.write.valid) {
-      array.write(waddr, Vec(io.write.bits.data), wmask)
-    }
-      /*.elsewhen (io.read.bits.way_en(w) && io.read.valid) {
-      reg_raddr := raddr
-    }
-    */
-    array.read(raddr)
-  }
-
-  io.resp.valid := ShiftRegister(io.read.fire(), 1)
-  io.resp.bits.id := ShiftRegister(io.read.bits.id, 1)
-  io.resp.bits.data := Mux1H(ShiftRegister(io.read.bits.way_en, 1), resp).toBits()
-
-  io.read.ready := !io.write.valid // TODO 1R/W vs 1R1W?
-  io.write.ready := Bool(true)
-
+  io.read.ready     := !io.write.valid
+  io.write.ready    := Bool(true)
 }
 
-// tag cache victim buffer
-class TagCacheVictimBuffer extends TagCacheModule {
-  val io = new TagCacheDataRWIO().flip
+// tag map metadata array, directly mapped
+class TagMapMetadataArray(implicit val p: Parameters) extends TagCacheModule()(p) {
+  val io = new TagCacheMetaIO[TMMetadata]().flip
 
-  val wmask = FillInterleaved(tagBlockTagBits, io.write.bits.wmask)
-  // victim buffer is implemented in registers
-  val array = Vec.fill(nWays){Reg(Bits(width=tagBlockTagBits * tagRowBlocks))}
+  val rst_cnt = Reg(init=UInt(0, log2Up(nSets+1)))
+  val rst = rst_cnt < UInt(nSets)
+  val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
+  val wdata = Mux(rst, TMMetadata(UInt(0)), io.write.bits.data)
+  when (rst) { rst_cnt := rst_cnt+UInt(1) }
 
-  (0 until nWays).map { w =>
-    when (io.write.bits.way_en(w) && io.write.valid) {
-      array(w) := (array(w) & (~wmask)) | (io.write.bits.data & wmask)
-    }
+  val ren = io.read.fire()
+  val tag_arr = SeqMem(nSets, new TMMetadata)
+  when (rst || io.write.valid) {
+    tag_arr.write(waddr, wdata)
   }
+  tags_vec  := tag_arr.read(io.read.bits.idx, ren)
+  tags_resp := tags_vec.valid && tags_vec.tag === s1_read.meta.tag
 
-  io.resp.valid := io.read.valid
-  io.resp.bits.id := io.read.bits.id
-  io.resp.bits.data := Mux1H(io.read.bits.way_en, array)
-  io.read.ready := Bool(true)
-  io.write.ready := Bool(true)
+  val s1_hit    = tags_resp
+  val s1_meta   = tags_vec
+  val s1_read_valid = Reg(next = ren)
+
+  io.resp.valid       := Reg(next = s1_read_valid)
+  io.resp.bits.hit    := RegEnable(s1_hit,      s1_read_valid)
+  io.resp.bits.meta   := RegEnable(s1_meta,     s1_read_valid)
+
+  io.read.ready := !rst && !io.write.valid // so really this could be a 6T RAM
+  io.write.ready := !rst
 }
+

@@ -10,7 +10,6 @@ import cde.{Parameters, Field}
 case object UseTagMem extends Field[Boolean]
 case object TagMapBits extends Field[Int]
 case object TagBits extends Field[Int]
-case object TCTransactors extends Field[Int]
 
 abstract trait HasTagParameters {
   implicit val p: Parameters
@@ -152,8 +151,4 @@ class TagUtil(
 
   // convert physical address to map address
   def pa2ma(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + mapBase
-
-  // convert tag address to map address
-  def ta2ma(addr: UInt): UInt = (addr >> unMapBits) + mapBase
-
 }
