@@ -8,23 +8,9 @@ import junctions.ParameterizedBundle
 case object TCMemTransactors extends Field[Int]
 case object TCTagTransactors extends Field[Int]
 
-trait HasTCParameters extends HasTagParameters {
+trait HasTCParameters extends HasCoherenceAgentParameters with HasTagParameters {
   val nMemTransactors = p(TCMemTransactors)
   val nTagTransactors = p(TCTagTransactors)
-  val outerTLId = p(OuterTLId)
-  val outerTLParams = p(TLKey(outerTLId))
-  val outerDataBeats = outerTLParams.dataBeats
-  val outerDataBits = outerTLParams.dataBitsPerBeat
-  val outerBeatAddrBits = log2Up(outerDataBeats)
-  val outerByteAddrBits = log2Up(outerDataBits/8)
-  val outerWriteMaskBits = outerTLParams.writeMaskBits
-  val innerTLId = p(InnerTLId)
-  val innerTLParams = p(TLKey(innerTLId))
-  val innerDataBeats = innerTLParams.dataBeats
-  val innerDataBits = tgHelper.sizeWithTag(innerTLParams.dataBitsPerBeat)
-  val innerWriteMaskBits = tgHelper.maskSizeWithTag(innerTLParams.writeMaskBits)
-  val innerBeatAddrBits = log2Up(innerDataBeats)
-  val innerByteAddrBits = log2Up(innerTLParams.dataBitsPerBeat/8)
 
   val refillCyclesPerBeat = outerDataBits/rowBits
   val refillCycles = refillCyclesPerBeat*tlDataBeats
@@ -37,7 +23,8 @@ trait HasTCParameters extends HasTagParameters {
 abstract class TCModule(implicit val p: Parameters) extends Module with HasTCParameters
 abstract class TCBundle(implicit val p: Parameters) extends ParameterizedBundle()(p) with HasTCParameters
 
-trait HasTCTagXactId extends HasTCParameters { val id     = UInt(width = log2Up(nTagTransactors)) }
+trait HasTCMemXactId extends HasTCParameters { val id = UInt(width = log2Up(nMemTransactors)) }
+trait HasTCTagXactId extends HasTCParameters { val id = UInt(width = log2Up(nTagTransactors)) }
 
 class TCMetadata(implicit p: Parameters) extends Metadata()(p) with HasTCParameters
 {
@@ -72,16 +59,16 @@ class TCMetaIO(implicit p: Parameters) extends TCBundle()(p) {
   override def cloneType = new TCMetaIO().asInstanceOf[this.type]
 }
 
-trait TCRow extends HasTCParameters  { val row    = UInt(width = log2Up(refillCycles)) }
-trait TCData extends HasTCParameters { val data   = UInt(width = rowBits) }
-trait TCMask extends HasTCParameters { val mask   = UInt(width = rowBytes) }
+trait HasTCRow extends HasTCParameters  { val row    = UInt(width = log2Up(refillCycles)) }
+trait HasTCData extends HasTCParameters { val data   = UInt(width = rowBits) }
+trait HasTCMask extends HasTCParameters { val mask   = UInt(width = rowBytes) }
 
-class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with TCRow {
+class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCRow {
   val idx = Bits(width = idxBits)
   val way_en = Bits(width = nWays)
 }
-class TCDataWriteReq(implicit p: Parameters) extends TCDataReadReq()(p) with TCData
-class TCDataReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with TCData
+class TCDataWriteReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCData with HasTCMask
+class TCDataReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCData
 
 class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   val read = Decoupled(new TCDataReadReq)
@@ -90,19 +77,141 @@ class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   override def cloneType = new TCDataIO().asInstanceOf[this.type]
 }
 
-class TagCacheManager(implicit p: Parameters) extends TagCacheModule()(p) {
+class TCWBReq(implicit p: Parameter) extends TCDataReadReq()(p)
+class TCWBResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId
+
+class TCWBIO(implicit p: Parameters) extends TCBundle()(p) {
+  val req = Decoupled(new TCWBReq)
+  val resp = Valid(new TCWBResp).flip
+}
+
+object TCTagOperation {
+  val tcOpTypes = 4
+  def tcReadType      = UInt(0)
+  def tcFetchReadType = UInt(1)
+  def tcWriteType     = UInt(2)
+  def tcCreateType    = UInt(3)
+}
+
+class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
+    with HasTCMemXactId with HasTCData with HasTCMask
+{
+  val opType = UInt(width=log2Up(tcOpTypes))
+  val addr = UInt(p(PAddrBits))
+}
+
+class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCMemXactId with HasTCData
+
+class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
+  val req = Decoupled(new TCTagRequest)
+  val resp = Valid(new TCTagResp).flip
+}
+
+////////////////////////////////////////////////////////////////
+// tag cache metadata array
+
+class TCMetadataArray(implicit val p: Parameters) extends TCModule()(p) {
+  val io = new TCMetaIO().flip
+
+  val ren = io.read.fire()
+  def onReset = TCMetadata(UInt(0), Bool(false), ClientMetadata.onReset)
+  val meta = Module(new MetadataArray[TCMetadata](onReset))
+  meta.io.read <> io.read
+  meta.io.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
+  meta.io.write <> io.write
+
+  val s1_read_valid = Reg(next = ren)
+  val s1_id         = RegEnable(io.read.bits.id, ren)
+  val s1_tag        = RegEnable(io.read.bits.tag, ren)
+  val s1_match_way  = meta.io.resp.map(m => m.tag === s1_tag && m.coh.isValid()).toBits
+
+  val s2_match_way  = RegEnable(s1_match_way, s1_read_valid)
+  val s2_repl_way   = RegEnable(replacer.way, s1_read_valid)
+  val s2_hit        = s2_match_way.orR
+  val s2_meta       = RegEnable(meta.io.resp, s1_read_valid)
+
+  when(s1_read_valid && !s1_match_way.orR) {replacer.miss}
+
+  io.resp.valid         := Reg(next = s1_read_valid)
+  io.resp.bits.id       := RegEnable(s1_id, s1_read_valid)
+  io.resp.bits.hit      := s2_hit
+  io.resp.bits.way_en   := Mux(s2_hit, s2_match_way, UIntToOH(s2_repl_way))
+  io.resp.bits.meta     := Mux(s2_hit, s2_meta(OHToUInt(s2_match_way)), s2_meta(s2_repl_way))
+  io.resp.bits.meta.tag := UInt(0)
+}
+
+////////////////////////////////////////////////////////////////
+// tag cache data array
+
+class TCDataArray(implicit val p: Parameters) extends TCModule()(p) {
+  val io = new TCDataIO().flip
+
+  val array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
+  val ren = io.read.fire()
+  val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.idx, io.read.bits.row)
+  val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.idx, io.write.bits.row)
+  val wdata = Vec.tabulate(rowBytes)(i => io.write.bits.data(8*(i+1)-1,8*i))
+  val wmask = io.write.bits.mask.toBools
+  when (io.write.valid) { array.write(waddr, wdata, wmask) }
+
+  val s1_data       = array.read(raddr, ren).toBits
+  val s1_read_valid = Reg(next = ren)
+  val s1_id         = RegEnable(io.read.bits.id, ren)
+
+  io.resp.valid     := Reg(next = s1_read_valid)
+  io.resp.bits.id   := RegEnable(s1_id, s1_read_valid)
+  io.resp.bits.data := RegEnable(s1_data, s1_read_valid)
+
+  io.read.ready     := !io.write.valid
+  io.write.ready    := Bool(true)
+}
+
+
+////////////////////////////////////////////////////////////////
+// Tag Cache Writeback Unit
+
+class TCTagWritebackUnit(implicit p: Parameters) extends TCModule()(p) {
   val io = new Bundle {
-    val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => innerTLId}))
-    val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => outerTLId}))
-    def iacq(dummy: Int = 0) = inner.acquire.bits
-    def iprb(dummy: Int = 0) = inner.probe.bits
-    def irel(dummy: Int = 0) = inner.release.bits
-    def ignt(dummy: Int = 0) = inner.grant.bits
-    def ifin(dummy: Int = 0) = inner.finish.bits
-    def oacq(dummy: Int = 0) = outer.acquire.bits
-    def ognt(dummy: Int = 0) = outer.grant.bits
+    val tracker = new TCWBIO().flip
+    val data    = new TCDataIO
   }
 }
+
+////////////////////////////////////////////////////////////////
+// Tag Transaction Tracker
+
+class TCTagXactTracker(implicit p: Parameters) extends TCModule()(p) {
+  val io = new Bundle {
+    val mem  = new TCTagXactIO().flip
+    val meta = new TCMetaIO
+    val data = new TCDataIO
+    val wb   = new TCWBIO
+  }
+}
+
+abstract class TCTLModule(implicit p: Parameters) extends TCModule()(p) {
+  def innerTL: ManagerTileLinkIO = io.inner
+  def outerTL: ClientUncachedTileLinkIO = io.outer
+}
+
+////////////////////////////////////////////////////////////////
+// Memory Transaction Tracker
+
+class TCMemXactTracker(implicit p: Parameters) extends TCTLModule()(p) {
+  val io = new Bundle {
+    val mem = new ManagerXactTrackerIO
+    val tc = new TCTagXactIO
+  }
+}
+
+////////////////////////////////////////////////////////////////
+// Top level of the Tag cache: Tag Cache Manager
+
+class TCManager(implicit p: Parameters) extends TCTLModule()(p) {
+  val io = new ManagerTLIO
+}
+
+
 
 /////////////////////////////
 
@@ -696,62 +805,6 @@ class TagCacheTracker(id: Int) extends TagCacheModule with NASTIParameters{
     }
   }
 
-}
-
-
-// tag cache metadata array
-class TCMetadataArray(implicit val p: Parameters) extends TCModule()(p) {
-  val io = new TCMetaIO().flip
-
-  val ren = io.read.fire()
-  def onReset = TCMetadata(UInt(0), Bool(false), ClientMetadata.onReset)
-  val meta = Module(new MetadataArray[TCMetadata](onReset))
-  meta.io.read <> io.read
-  meta.io.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
-  meta.io.write <> io.write
-
-  val s1_read_valid = Reg(next = ren)
-  val s1_id         = RegEnable(io.read.bits.id, ren)
-  val s1_tag        = RegEnable(io.read.bits.tag, ren)
-  val s1_match_way  = meta.io.resp.map(m => m.tag === s1_tag && m.coh.isValid()).toBits
-
-  val s2_match_way  = RegEnable(s1_match_way, s1_read_valid)
-  val s2_repl_way   = RegEnable(replacer.way, s1_read_valid)
-  val s2_hit        = s2_match_way.orR
-  val s2_meta       = RegEnable(meta.io.resp, s1_read_valid)
-
-  when(s1_read_valid && !s1_match_way.orR) {replacer.miss}
-
-  io.resp.valid         := Reg(next = s1_read_valid)
-  io.resp.bits.id       := RegEnable(s1_id, s1_read_valid)
-  io.resp.bits.hit      := s2_hit
-  io.resp.bits.way_en   := Mux(s2_hit, s2_match_way, UIntToOH(s2_repl_way))
-  io.resp.bits.meta     := Mux(s2_hit, s2_meta(OHToUInt(s2_match_way)), s2_meta(s2_repl_way))
-  io.resp.bits.meta.tag := UInt(0)
-}
-
-// tag cache data array
-class TCDataArray(implicit val p: Parameters) extends TCModule()(p) {
-  val io = new TCDataIO().flip
-
-  val array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
-  val ren = io.read.fire()
-  val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.idx, io.read.bits.row)
-  val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.idx, io.write.bits.row)
-  val wdata = Vec.tabulate(rowBytes)(i => io.write.bits.data(8*(i+1)-1,8*i))
-  val wmask = io.write.bits.mask.toBools
-  when (io.write.valid) { array.write(waddr, wdata, wmask) }
-
-  val s1_data       = array.read(raddr, ren).toBits
-  val s1_read_valid = Reg(next = ren)
-  val s1_id         = RegEnable(io.read.bits.id, ren)
- 
-  io.resp.valid     := Reg(next = s1_read_valid)
-  io.resp.bits.id   := RegEnable(s1_id, s1_read_valid)
-  io.resp.bits.data := RegEnable(s1_data, s1_read_valid)
-
-  io.read.ready     := !io.write.valid
-  io.write.ready    := Bool(true)
 }
 
 
