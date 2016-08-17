@@ -85,11 +85,11 @@ trait HasTileLinkParameters extends HasTagParameters{
   val amoAluOperandBits = p(AmoAluOperandBits)
   val amoAluOperandBytes = amoAluOperandBits/8
 
-  def getBlockAddr(addr:UInt): UInt = addr >> tlBlockOffsetBits
-  def getBeatAddr(addr:UInt): UInt =
+  def tlGetBlockAddr(addr:UInt): UInt = addr >> tlBlockOffsetBits
+  def tlGetBeatAddr(addr:UInt): UInt =
     if (tlDataBeats > 1) addr(tlBlockOffsetBits-1, tlByteAddrBits) else UInt(0)
-  def getByteAddr(addr:UInt): UInt = addr(tlByteAddrBits-1, 0)
-  def getFullAddr(blockAddr:UInt, beatAddr:UInt, byteAddr:UInt): UInt =
+  def tlGetByteAddr(addr:UInt): UInt = addr(tlByteAddrBits-1, 0)
+  def tlGetFullAddr(blockAddr:UInt, beatAddr:UInt, byteAddr:UInt): UInt =
     if (tlDataBeats > 1) Cat(blockAddr, beatAddr, byteAddr) else Cat(blockAddr, byteAddr)
 }
 

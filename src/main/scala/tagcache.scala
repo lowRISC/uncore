@@ -9,11 +9,20 @@ case object TCMemTransactors extends Field[Int]
 case object TCTagTransactors extends Field[Int]
 
 trait HasTCParameters extends HasCoherenceAgentParameters with HasTagParameters {
-  val nMemTransactors = p(TCMemTransactors)
+  val nMemAcquireTransactors = p(TCMemTransactors)
+  val nMemReleaseTransactors = 1
+  val nMemTransactors = nMemReleaseTransactors + nMemAcquireTransactors
   val nTagTransactors = p(TCTagTransactors)
 
   val refillCyclesPerBeat = outerDataBits/rowBits
   val refillCycles = refillCyclesPerBeat*tlDataBeats
+
+  val cacheAccDelay = 2 // delay of accessing metadata or data arrays
+
+  val tcTagTLParams = p.alterPartial({
+    case CacheName => "TagCache"
+    case InnerTLId => "TC"
+  })
 
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.tlTagged && innerTLParams.tlTagged)
@@ -42,14 +51,14 @@ object TCMetadata {
   }
 }
 
-class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTagXactId {
-  val tag = Bits(width = tagBits)
-}
+trait HasTCTag extends HasTCParameters { val tag = UInt(width = tagBits) }
+
+class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTag with HasTCTagXactId
 class TCMetaWriteReq(implicit p: Parameters) extends MetaWriteReq[TCMetadata]()(p)
 class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId {
   val hit = Bool()
   val meta = new TCMetadata
-  val way_en = Bits(width = nWays)
+  val way_en = UInt(width = nWays)
 }
 
 class TCMetaIO(implicit p: Parameters) extends TCBundle()(p) {
@@ -77,7 +86,7 @@ class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   override def cloneType = new TCDataIO().asInstanceOf[this.type]
 }
 
-class TCWBReq(implicit p: Parameter) extends TCDataReadReq()(p)
+class TCWBReq(implicit p: Parameter) extends TCDataReadReq()(p) with HasTCTag
 class TCWBResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId
 
 class TCWBIO(implicit p: Parameters) extends TCBundle()(p) {
@@ -170,22 +179,74 @@ class TCDataArray(implicit val p: Parameters) extends TCModule()(p) {
 ////////////////////////////////////////////////////////////////
 // Tag Cache Writeback Unit
 
-class TCTagWritebackUnit(implicit p: Parameters) extends TCModule()(p) {
+class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) with HasTileLinkParameters {
   val io = new Bundle {
-    val tracker = new TCWBIO().flip
-    val data    = new TCDataIO
+    val xact = new TCWBIO().flip
+    val data = new TCDataIO
+    val tl   = new ClientUncachedTileLinkIO()
   }
+
+  val S_IDLE :: S_READ :: S_READ_DONE :: S_WRITE :: Nil = Enum(UInt(), 5)
+  val state = Reg(init = S_IDLE)
+
+  val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
+  val (read_cnt, read_done) = Counter(io.data.read.fire() && state == S_READ, refillCycles)
+  val (write_cnt, write_done) = Counter(io.data.resp.valid, refillCycles)
+
+  val tl_buffer = Wire(Vec(tlDataBeats, UInt(width=outerDataBits)))
+  tl_buffer := tl_buffer.fromBits(data_buffer.toBits)
+  val (tl_cnt, tl_done) = Counter(state === S_WRITE && tl.acquire.fire(), tlDataBeats)
+
+  val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
+  io.xact.req.ready := state === S_IDLE
+  io.xact.resp.valid := state === S_WRITE && tl_done
+  io.xact.resp.bits.id := xact.id
+
+  io.data.read.valid := state === S_READ
+  io.data.read.bits := xact
+  io.data.read.bits.id := UInt(id)
+  io.data.read.bits.row := read_cnt
+
+  when(io.data.resp.valid) {
+    data_buffer(write_cnt) := io.data.resp.bits.data
+  }
+
+  io.tl.acquire.valid := state === S_WRITE
+  val tl_addr = Cat(xact.tag, xact.idx, tl_cnt, UInt(0, rowOffBits))
+  io.tl.acquire.bits :=
+    PutBlock(
+      UInt(nMemTransactors+id),
+      getBlockAddr(tl_addr),
+      getBeatAddr(tl_addr),
+      tl_buffer(tl_cnt)
+    )
+
+  when(state === S_IDLE && io.xact.req.valid) {
+    state := S_READ
+  }
+  when(state === S_READ && read_done) {
+    // check whether data is available in time considering the accessing delay
+    state := if(tlDataBeats >= cacheAccDelay) S_WRITE else S_READ_DONE
+  }
+  when(state === S_READ_DONE && write_done) {
+    state := S_WRITE
+  }
+  when(io.xact.resp.valid) {
+    state := S_IDLE
+  }
+
 }
 
 ////////////////////////////////////////////////////////////////
 // Tag Transaction Tracker
 
-class TCTagXactTracker(implicit p: Parameters) extends TCModule()(p) {
+class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
   val io = new Bundle {
     val mem  = new TCTagXactIO().flip
     val meta = new TCMetaIO
     val data = new TCDataIO
     val wb   = new TCWBIO
+    val tl   = new ClientUncachedTileLinkIO()
   }
 }
 
@@ -197,18 +258,33 @@ abstract class TCTLModule(implicit p: Parameters) extends TCModule()(p) {
 ////////////////////////////////////////////////////////////////
 // Memory Transaction Tracker
 
-class TCMemXactTracker(implicit p: Parameters) extends TCTLModule()(p) {
-  val io = new Bundle {
-    val mem = new ManagerXactTrackerIO
-    val tc = new TCTagXactIO
-  }
+class TCMemXactTrackerIO(implicit p: Parameters) extends ManagerXactTrackerIO()(p) {
+  val tc = new TCTagXactIO
 }
 
-////////////////////////////////////////////////////////////////
-// Top level of the Tag cache: Tag Cache Manager
+class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCTLModule()(p) {
+  val io = new TCMemXactTrackerIO
+}
 
-class TCManager(implicit p: Parameters) extends TCTLModule()(p) {
+class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p)
+class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p)
+
+////////////////////////////////////////////////////////////////
+// Top level of the Tag Cache
+
+class TagCache(implicit p: Parameters) extends TCTLModule()(p) {
   val io = new ManagerTLIO
+
+  val meta      = Module(new TCMetadataArray()(tcTagTLParams))
+  val data      = Module(new TCDataArray()(tcTagTLParams))
+  val writeback = Module(new TCWritebackUnit()(tcTagTLParams))
+
+  val memXactTrackerList =
+    (0               until nReleaseTransactor).map(id => Module(new TCMemReleaseTracker(id))) ++
+    (nReleaseTransactor until nMemTransactors).map(id => Module(new TCMemAcquireTracker(id)))
+
+  val tagXactTrackerList = (0 until nTagTransactors).map(id =>
+    Module(new TCTagXactTracker(id)(tcTagTLParams)))
 }
 
 
