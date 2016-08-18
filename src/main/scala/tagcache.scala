@@ -7,6 +7,7 @@ import junctions.ParameterizedBundle
 
 case object TCMemTransactors extends Field[Int]
 case object TCTagTransactors extends Field[Int]
+case object TCEarlyAck extends Field[Boolean]
 
 trait HasTCParameters extends HasCoherenceAgentParameters with HasTagParameters {
   val nMemAcquireTransactors = p(TCMemTransactors)
@@ -24,6 +25,8 @@ trait HasTCParameters extends HasCoherenceAgentParameters with HasTagParameters 
     case InnerTLId => "TC"
   })
 
+  val eralyAck = p(TCEarlyAck) // early ack optimization to reduce delay
+
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.tlTagged && innerTLParams.tlTagged)
   require(outerTLId == p(TLId))
@@ -37,15 +40,15 @@ trait HasTCTagXactId extends HasTCParameters { val id = UInt(width = log2Up(nTag
 
 class TCMetadata(implicit p: Parameters) extends Metadata()(p) with HasTCParameters
 {
-  val tagged = Bool
+  val tagFlasg = UInt(width = 1)
   override def cloneType = new TCMetadata().asInstanceOf[this.type]
 }
 
 object TCMetadata {
-  def apply(tag:Bits, tagged:Bool, coh: ClientMetadata)(implicit p: Parameters) = {
+  def apply(tag:UInt, tagFlag:UInt, coh: ClientMetadata)(implicit p: Parameters) = {
     val meta = Wire(new TCMetadata)
     meta.tag := tag
-    meta.tagged := tagged
+    meta.tagFlag := tagFlag
     meta.coh := coh
     meta
   }
@@ -123,7 +126,7 @@ class TCMetadataArray(implicit val p: Parameters) extends TCModule()(p) {
   val io = new TCMetaIO().flip
 
   val ren = io.read.fire()
-  def onReset = TCMetadata(UInt(0), Bool(false), ClientMetadata.onReset)
+  def onReset = TCMetadata(UInt(0), UInt(0), ClientMetadata.onReset)
   val meta = Module(new MetadataArray[TCMetadata](onReset))
   meta.io.read <> io.read
   meta.io.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
@@ -186,7 +189,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     val tl   = new ClientUncachedTileLinkIO()
   }
 
-  val S_IDLE :: S_READ :: S_READ_DONE :: S_WRITE :: Nil = Enum(UInt(), 5)
+  val S_IDLE :: S_READ :: S_READ_DONE :: S_WRITE :: Nil = Enum(UInt(), 4)
   val state = Reg(init = S_IDLE)
 
   val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
@@ -199,7 +202,11 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 
   val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
   io.xact.req.ready := state === S_IDLE
-  io.xact.resp.valid := state === S_WRITE && tl_done
+  if (earlyAck) {
+    io.xact.resp.valid := state === S_READ && read_done
+  } else {
+    io.xact.resp.valid := state === S_WRITE && tl_done
+  }
   io.xact.resp.bits.id := xact.id
 
   io.data.read.valid := state === S_READ
@@ -240,14 +247,71 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 ////////////////////////////////////////////////////////////////
 // Tag Transaction Tracker
 
-class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
+class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) with HasTileLinkParameters {
   val io = new Bundle {
-    val mem  = new TCTagXactIO().flip
+    val xact = new TCTagXactIO().flip
     val meta = new TCMetaIO
     val data = new TCDataIO
     val wb   = new TCWBIO
     val tl   = new ClientUncachedTileLinkIO()
   }
+
+  // meta.R             always read metadata first
+  // data.FWB           fetch and write back, fatch when F+R/W.miss
+  //                    WB when F+R/W.miss and C needs replace write-back
+  // data.R             read data array when W.h and F+R/R.h.t=1
+  // data.BW            write a whole cache block in data array when F+R/W.m and C
+  // data.RW            write a row in data array when W.h
+  // data.C             check the whole cache line to see if potentially tagFlag reset
+  // meta.W             write metadata when F.m, C, W.m and W.h.t!=t'
+
+  val S_IDLE :: S_M_R_REQ :: S_M_R_RESP :: S_D_FWB_REQ :: S_D_FWB_RESP :: S_D_R_REQ :: S_D_R_RESP :: S_D_BW :: S_D_RW :: S_D_C_REQ :: S_D_C_RESP :: S_M_W_REQ :: Nil = Enum(UInt(), 12)
+  val state = Reg(init = S_IDLE)
+
+  when(state === S_IDLE) {
+    state := S_M_R_REQ
+  }
+  when(state === S_M_R_REQ) {
+    state := S_M_R_RESP
+  }
+  when(state === S_M_R_RESP) {
+    state := S_IDLE
+    state := S_D_FWB_REQ
+    state := S_D_R_REQ
+  }
+  when(state === S_D_FWB_REQ) {
+    state := S_D_FWB_RESP
+  }
+  when(state === S_D_FWB_RESP) {
+    state := S_D_BW
+  }
+  when(state === S_D_R_REQ) {
+    state := S_D_R_RESP
+  }
+  when(state === S_D_R_RESP) {
+    state := S_IDLE
+    state := S_D_RW
+  }
+  when(state === S_D_BW) {
+    state := S_M_W
+  }
+  when(state === S_D_RW) {
+    state := S_IDLE
+    state := S_M_W
+    state := S_D_C_REQ
+  }
+  when(state === S_D_C_REQ) {
+    state := S_D_C_RESP
+  }
+  when(state === S_D_C_RESP) {
+    state := S_IDLE
+    state := S_M_W
+  }
+  when(state === S_M_W) {
+    state := S_IDLE
+  }
+
+
 }
 
 abstract class TCTLModule(implicit p: Parameters) extends TCModule()(p) {
