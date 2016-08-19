@@ -37,9 +37,32 @@ abstract class TCBundle(implicit val p: Parameters) extends ParameterizedBundle(
 
 trait HasTCMemXactId extends HasTCParameters { val id = UInt(width = log2Up(nMemTransactors)) }
 trait HasTCTagXactId extends HasTCParameters { val id = UInt(width = log2Up(nTagTransactors)) }
+trait HasTCTagFlag   extends HasTCParameters { val tagFlag = UInt(width = 1) }
+trait HasTCTag       extends HasTCParameters { val tag = UInt(width = tagBits) }
+trait HasTCHit       extends HasTCParameters { val hit = Bool() }
+
+class TCMIIncoherence(implicit p: Parameters) extends CoherenceMetadata()(p) {
+  val state = Bool()
+
+  def isValid(dummy:Int=0):Bool = state
+}
+
+object TCMIIncoherence {
+  def onReset = {
+    val meta = Wire(new TCMIIncoherence)
+    meta.state := Bool(false)
+    meta
+  }
+  def onGrant = {
+    val meta = Wire(new TCMIIncoherence)
+    meta.state := Bool(true)
+    meta
+  }
+}
 
 class TCMetadata(implicit p: Parameters) extends Metadata()(p) with HasTCParameters
 {
+  val coh = new TCMIIncoherence
   val tagFlasg = UInt(width = 1)
   override def cloneType = new TCMetadata().asInstanceOf[this.type]
 }
@@ -54,12 +77,9 @@ object TCMetadata {
   }
 }
 
-trait HasTCTag extends HasTCParameters { val tag = UInt(width = tagBits) }
-
 class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTag with HasTCTagXactId
 class TCMetaWriteReq(implicit p: Parameters) extends MetaWriteReq[TCMetadata]()(p)
-class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId {
-  val hit = Bool()
+class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCHit {
   val meta = new TCMetadata
   val way_en = UInt(width = nWays)
 }
@@ -80,7 +100,8 @@ class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCTagX
   val way_en = Bits(width = nWays)
 }
 class TCDataWriteReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCData with HasTCMask
-class TCDataReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCData
+class TCDataReadResp(implicit p: Parameters) extends TCBundle()(p)
+    with HasTCTagXactId with HasTCData
 
 class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   val read = Decoupled(new TCDataReadReq)
@@ -97,22 +118,23 @@ class TCWBIO(implicit p: Parameters) extends TCBundle()(p) {
   val resp = Valid(new TCWBResp).flip
 }
 
-object TCTagOperation {
-  val tcOpTypes = 4
-  def tcReadType      = UInt(0)
-  def tcFetchReadType = UInt(1)
-  def tcWriteType     = UInt(2)
-  def tcCreateType    = UInt(3)
+object TCTagOp {
+  def nTypes    = 4
+  def Read      = UInt(0)
+  def FetchRead = UInt(1)
+  def Write     = UInt(2)
+  def Create    = UInt(3)
 }
 
 class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
     with HasTCMemXactId with HasTCData with HasTCMask
 {
-  val opType = UInt(width=log2Up(tcOpTypes))
-  val addr = UInt(p(PAddrBits))
+  val op   = UInt(width=log2Up(TCTagOp.nTypes))
+  val addr = UInt(width=p(PAddrBits))
 }
 
-class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCMemXactId with HasTCData
+class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCMemXactId
+    with HasTCHit with HasTCData with HasTCTagFlag
 
 class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
   val req = Decoupled(new TCTagRequest)
@@ -126,7 +148,7 @@ class TCMetadataArray(implicit val p: Parameters) extends TCModule()(p) {
   val io = new TCMetaIO().flip
 
   val ren = io.read.fire()
-  def onReset = TCMetadata(UInt(0), UInt(0), ClientMetadata.onReset)
+  def onReset = TCMetadata(UInt(0), UInt(0), TCMIIncoherence.onReset)
   val meta = Module(new MetadataArray[TCMetadata](onReset))
   meta.io.read <> io.read
   meta.io.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
@@ -202,12 +224,13 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 
   val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
   io.xact.req.ready := state === S_IDLE
+
+  io.xact.resp.bits.id := xact.id
   if (earlyAck) {
     io.xact.resp.valid := state === S_READ && read_done
   } else {
     io.xact.resp.valid := state === S_WRITE && tl_done
   }
-  io.xact.resp.bits.id := xact.id
 
   io.data.read.valid := state === S_READ
   io.data.read.bits := xact
@@ -268,49 +291,188 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val S_IDLE :: S_M_R_REQ :: S_M_R_RESP :: S_D_FWB_REQ :: S_D_FWB_RESP :: S_D_R_REQ :: S_D_R_RESP :: S_D_BW :: S_D_RW :: S_D_C_REQ :: S_D_C_RESP :: S_M_W_REQ :: Nil = Enum(UInt(), 12)
   val state = Reg(init = S_IDLE)
 
+  // transaction request
+  val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
+  io.xact.req.ready := state === S_IDLE
+
+  // transaction response
+  io.xact.resp.bits.id := xact.id
+  io.xact.resp.bits.hit := Bool(true)
+  io.xact.resp.bits.tagFlag := UInt(0)
+  io.xact.resp.bits.data := UInt(0)
+  io.xact.resp.valid := bool(false)
+  val xact_resp_done = Reg(init=Bool(false)) // simplify early ack check (no double ack)
+  when(state === S_D_R_RESP || state === S_M_R_RESP) {
+    io.xact.resp.bits.tagFlag := (0 until rowBytes).map(i => {
+      xact.mask(i) && xact.data(i*8+7,i*8).orR
+    }).toBits.orR
+  }
+
+  // metadata read
+  val idx = xact.addr(idxBits+blockOffBits-1, blockOffBits)
+  val addrTag = xact.addr >> untagBits
+  io.meta.read.bits.id := UInt(id)
+  io.meta.read.bits.idx := idx
+  //io.meta.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
+  io.meta.read.bits.tag := addrTag
+  io.meta.read.valid := state === S_M_R_REQ
+
+  // metadata read response
+  val meta = Reg(TCMetadata)
+  val way_en = Reg(UInt(width = nWays))
+
+  // metadata write
+  io.meta.write.bits.id := UInt(id)
+  io.meta.write.bits.idx := idx
+  io.meta.write.bits.way_en := way_en
+  io.meta.write.bits.tag := addrTag
+  io.meta.write.bits.meta := meta
+  io.meta.write.valid := state === S_M_W
+
+  // data array read
+  val row = xact.addr(blockOffBits-1,rowOffBits)
+  io.data.read.bits.id := UInt(id)
+  io.data.read.bits.row := row
+  io.data.read.bits.idx := idx
+  io.data.read.bits.way_en := way_en
+  io.data.read.valid := state === S_D_R_REQ
+
+  // data read response
+
+  // data array write
+  val write_buf = Wire(Vec(refillCycles, UInt(width=rowBits)))
+  val write_data = xact.data
+  val write_mask = xact.mask
+  io.data.write.bits.id := UInt(id)
+  io.data.write.bits.row := Mux(state === S_D_RW, row, write_cnt)
+  io.data.write.bits.idx := idx
+  io.data.write.bits.way_en := way_en
+  io.data.write.bits.data := write_data
+  io.data.write.bits.mask := write_mask
+  when(state === S_D_BW) {
+    write_data := write_buf(write_cnt)
+    write_mask := (Vec.fill(rowBits){Bool(true)}).toBits
+  }
+  io.data.write.valid := state === S_D_RW || state === S_D_BW
+
+
+
   when(state === S_IDLE) {
+    if(earlyAck) xact_resp_done := Bool(false)
     state := S_M_R_REQ
   }
-  when(state === S_M_R_REQ) {
+  when(state === S_M_R_REQ && io.meta.read.fire()) {
     state := S_M_R_RESP
   }
-  when(state === S_M_R_RESP) {
-    state := S_IDLE
-    state := S_D_FWB_REQ
-    state := S_D_R_REQ
+  when(state === S_M_R_RESP && io.meta.resp.valid) {
+    meta := io.meta.resp.meta // move it out!
+    way_en := io.meta.resp.way_en
+
+    when(io.meta.resp.bits.hit) {
+      when(io.meta.resp.bits.meta.tagFlag === UInt(0)) {
+        when(xact.op === TCTagOp.Read || xact.op === TCTagOp.FetchRead) {
+          // R/F+R hit,t==0
+          io.xact.resp.valid := Bool(true)
+          state := S_IDLE
+        }.otherwise{
+          // W/C hit,t==0
+          if(earlyAck) {
+            xact_resp_done := Bool(true)
+            io.xact.resp.valid := Bool(true)
+          }
+          xact.op := TCTagOp.Create // Use Create to denote t==0
+          state := S_D_RW
+        }
+      }.otherwise{
+        // All hit,t!=0
+        state := S_D_R_REQ
+      }
+    }.otherwise{
+      when(xact.op === TCTagOp.Read) {
+        // R miss
+        io.xact.resp.bits.hit := Bool(false)
+        io.xact.resp.valid := Bool(true)
+        state := S_IDLE
+      }.otherwise{
+        // F+R/W/C miss
+        state := S_D_FWB_REQ
+      }
+    }
   }
   when(state === S_D_FWB_REQ) {
     state := S_D_FWB_RESP
   }
-  when(state === S_D_FWB_RESP) {
+  when(state === S_D_FWB_RESP && fecth_done && writeback_done) {
+    // F+R/W/C miss
+    if(earlyAck) {
+      xact_resp_done := Bool(true)
+      io.xact.resp.bits.data := write_buf(xact.row)
+      io.xact.resp.bits.tagFlag := meta.tagFlag
+      io.xact.resp.valid := Bool(true)
+    }
     state := S_D_BW
   }
-  when(state === S_D_R_REQ) {
+  when(state === S_D_R_REQ && io.data.read.fire()) {
     state := S_D_R_RESP
   }
-  when(state === S_D_R_RESP) {
-    state := S_IDLE
-    state := S_D_RW
+  when(state === S_D_R_RESP && io.data.resp.valid) {
+    when(xact.op === TCTagOp.Read || xact.op === TCTagOp.FetchRead) {
+      // R/F+R hit,t!=0
+      io.xact.resp.bits.data := io.data.resp.bits.data
+      io.xact.resp.bits.tagFlag := meta.tagFlag
+      io.xact.resp.valid := Bool(true)
+      state := S_IDLE
+    }.otherwise{
+      // W/C hit, t!=0
+      when(io.xact.resp.tagFlag) { // if t' != 0
+        if(earlyAck) {
+          xact_resp_done := Bool(true)
+          io.xact.resp.valid := Bool(true)
+        }
+      }
+      meta.tagFlag := io.xact.resp.tagFlag // move out
+      xact.op := TCTagOp.Write
+      state := S_D_RW
+    }
   }
-  when(state === S_D_BW) {
+  when(state === S_D_BW && data_write_done) {
     state := S_M_W
   }
-  when(state === S_D_RW) {
-    state := S_IDLE
-    state := S_M_W
-    state := S_D_C_REQ
+  when(state === S_D_RW && io.data.write.fire()) {
+    when((xact.op === TCTagOp.Create && meta.tagFlag === UInt(0)) ||
+         (xact.op === TCTagOp.Write  && meta.tagFlag =/= UInt(0)))
+    {
+      // t == t'
+      io.xact.resp.bits.tagFlag := meta.tagFlag
+      io.xact.resp.valid := !xact_resp_done
+      state := S_IDLE
+    }.elsewhen(xact.op === TCTagOp.Create && meta.tagFlag =/= UInt(0)) {
+      // t: 0->1
+      state := S_M_W
+    }.otherwise{
+      // t: 1->0?
+      state := S_D_C_REQ
+    }
   }
-  when(state === S_D_C_REQ) {
+  when(state === S_D_C_REQ && check_req_done) {
     state := S_D_C_RESP
   }
-  when(state === S_D_C_RESP) {
-    state := S_IDLE
-    state := S_M_W
+  when(state === S_D_C_RESP && check_resp_done) {
+    when(meta.tagFlag === UInt(0)) {
+      // really t:1->0
+      if(earlyAck) {
+        xact_resp_done := Bool(true)
+        io.xact.resp.valid := Bool(true)
+      }
+      state := S_M_W
+    }.otherwise{
+      state := S_IDLE
+    }
   }
-  when(state === S_M_W) {
+  when(state === S_M_W && io.meta.write.fire()) {
+    io.xact.resp.valid := !xact_resp_done
     state := S_IDLE
   }
-
 
 }
 
