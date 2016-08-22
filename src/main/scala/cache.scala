@@ -21,6 +21,7 @@ case object ECCCode extends Field[Option[Code]]
 case object CacheIdBits extends Field[Int]
 case object CacheId extends Field[Int]
 case object SplitMetadata extends Field[Boolean]
+case object RAMSize extends Field[BigInt]
 
 trait HasCacheParameters {
   implicit val p: Parameters

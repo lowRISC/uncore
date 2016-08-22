@@ -297,7 +297,7 @@ class AcquireMetadata(implicit p: Parameters) extends ClientToManagerChannel
     with HasAcquireType
     with HasAcquireUnion {
   /** Complete physical address for block, beat or operand */
-  def full_addr(dummy: Int = 0) = getFullAddr(this.addr_block, this.addr_beat, this.addr_byte())
+  def full_addr(dummy: Int = 0) = tlGetFullAddr(this.addr_block, this.addr_beat, this.addr_byte())
 }
 
 /** [[uncore.AcquireMetadata]] with an extra field containing the data beat */
@@ -705,7 +705,7 @@ class ReleaseMetadata(implicit p: Parameters) extends ClientToManagerChannel
     with HasCacheBlockAddress 
     with HasClientTransactionId 
     with HasReleaseType {
-  def full_addr(dummy: Int = 0) = getFullAddr(this.addr_block, this.addr_beat, UInt(0, width = tlByteAddrBits))
+  def full_addr(dummy: Int = 0) = tlGetFullAddr(this.addr_block, this.addr_beat, UInt(0, width = tlByteAddrBits))
 }
 
 /** [[uncore.ReleaseMetadata]] with an extra field containing the data beat */

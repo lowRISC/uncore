@@ -17,7 +17,7 @@ abstract trait HasTagParameters {
   val tgMapRatio = p(TagMapRatio)                       // the number of bits a map bit represents
   val useTagMem = p(UseTagMem)
 
-  val tgHelper = TagUtil(tgBits, tgMapRatio,
+  val tgHelper = new TagUtil(tgBits, tgMapRatio,
     p(RAMSize), p(GlobalAddrHashMap)("mem").start,
     p(CacheBlockBytes))                                 // tag helper functions
 }
@@ -37,7 +37,7 @@ class TagUtil(
   def tagRatio = wordBits / normTagBits                 // tag compression ratio
   def unTagBits = log2Up(tagRatio)                      // offset bits to get tag address
   def unMapBits = log2Up(mapRatio)                      // offset bits to get map address
-  def tableSize = memSize / tagRaio                     // size of the tag table
+  def tableSize = memSize / tagRatio                     // size of the tag table
   def tableBase = memBase + memSize - tableSize         // base address of the tag table
   def map0Size  = tableSize / mapRatio                  // size of tag map 0
   def map0Base  = memBase + memSize - map0Size          // base address of tag map 0
@@ -51,18 +51,16 @@ class TagUtil(
   def removeTag(data: UInt): UInt = {
     require(data.getWidth >= tagWordBits && data.getWidth % tagWordBits == 0)
     val words = data.getWidth / tagWordBits
-    (0 until words).map( i =>
-      data(i*tagWordBits + wordBits - 1, i*tagWordBits)
-    ).toBits
+    Vec((0 until words).map(i => data(i*tagWordBits + wordBits - 1, i*tagWordBits))).toBits
   }
 
   // extract the tags from a tagged data line
   def extractTag(data: UInt): UInt = {
     require(data.getWidth >= tagWordBits && data.getWidth % tagWordBits == 0)
     val words = data.getWidth / tagWordBits
-    (0 until words).map( i =>
-      tagData(i*tagWordBits + tagWordBits - 1, i*tagWordBits + wordBits)
-    ).toBits
+    Vec((0 until words).map( i =>
+      data(i*tagWordBits + tagWordBits - 1, i*tagWordBits + wordBits)
+    )).toBits
   }
 
   // Insert tags
@@ -70,12 +68,12 @@ class TagUtil(
     require(data.getWidth >= wordBits && data.getWidth % wordBits == 0)
     require(tags.getWidth == tagBits * data.getWidth / wordBits)
     val words = data.getWidth / wordBits
-    (0 until words).map( i =>
+    Vec((0 until words).map( i =>
       Cat(
         tags(i*tagBits + tagBits - 1, i*tagBits),
-        rawData(i*wordBits + wordBits - 1, i*wordBits)
+        data(i*wordBits + wordBits - 1, i*wordBits)
       )
-    ).toBits
+    )).toBits
   }
 
   // Insert a fixed tag to all words
@@ -90,42 +88,46 @@ class TagUtil(
   def insertTagMaskAuto(mask: UInt): UInt = {
     require(mask.getWidth >= wordBytes && mask.getWidth % wordBytes == 0)
     val words = mask.getWidth / wordBytes
-    (0 until words).map( i => {
+    Vec((0 until words).map( i => {
       val wordMask = mask(i*wordBytes + wordBytes - 1, i*wordBytes)
       // write tag if any byte of the word is written
       Cat(wordMask.orR, wordMask)
-    }).toBits
+    })).toBits
   }
 
   // insert rite mask for tags
   def insertTagMask(mask: UInt, tgMask: Bool = Bool(false)): UInt = {
     require(mask.getWidth >= wordBytes && mask.getWidth % wordBytes == 0)
     val words = mask.getWidth / wordBytes
-    (0 until words).map( i => {
-      Cat(tagMask, mask(i*wordBytes + wordBytes - 1, i*wordBytes))
-    }).toBits
+    Vec((0 until words).map( i => {
+      Cat(tgMask, mask(i*wordBytes + wordBytes - 1, i*wordBytes))
+    })).toBits
   }
 
   // remove tag mask
   def removeTagMask(mask: UInt): UInt = {
     require(mask.getWidth >= wordBytes + 1 && mask.getWidth % (wordBytes + 1) == 0)
     val words = mask.getWidth / (wordBytes + 1)
-    (0 until words).map( i =>
+    Vec((0 until words).map( i =>
       mask(i*(wordBytes+1) + wordBytes - 1, i*(wordBytes+1))
-    ).toBits
+    )).toBits
   }
 
   // extract the tag write mask
   def extractTagMask(mask: UInt): UInt = {
     require(mask.getWidth >= wordBytes + 1 && mask.getWidth % (wordBytes + 1) == 0)
     val words = mask.getWidth / (wordBytes + 1)
-    (0 until words).map(mask(_*wordBytes)).toBits
+    Vec((0 until words).map(i => mask(i*wordBytes))).toBits
   }
 
   // calculate the extended size with tags
   def sizeWithTag(s: Int): Int = {
     require(s >= wordBits && s % wordBits == 0)
     s / wordBits * tagWordBits
+  }
+
+  def sizeWithTag(s: UInt): UInt = {
+    s / UInt(wordBits) * UInt(tagWordBits)
   }
 
   // calculate the size without tags
@@ -137,7 +139,7 @@ class TagUtil(
   // calculate the extended mask size with tags
   def maskSizeWithTag(s: Int): Int = {
     require(s >= wordBytes && s % wordBytes == 0)
-    s / wordByte * (wordBytes + 1)
+    s / wordBytes * (wordBytes + 1)
   }
 
   // calculate the mask size without tags
@@ -147,11 +149,11 @@ class TagUtil(
   }
 
   // convert physical address to tag table address
-  def pa2tta(addr: UInt): UInt = (addr >> unTagBits) + tableBase
+  def pa2tta(addr: UInt): UInt = (addr >> unTagBits) + UInt(tableBase)
 
   // convert physical address to tag map 0 address
-  def pa2tm0a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + map0Base
+  def pa2tm0a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + UInt(map0Base)
 
   // convert physical address to tag map 1 address
-  def pa2tm1a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits + unMapBits)) + map1Base
+  def pa2tm1a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
 }
