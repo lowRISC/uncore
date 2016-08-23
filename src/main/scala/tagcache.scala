@@ -339,11 +339,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.meta.read.bits.tag := addrTag
   io.meta.read.valid := state === s_M_R_REQ
 
-  // metadata read response
-  when(state === s_M_R_RESP && io.meta.resp.valid) {
-    meta := io.meta.resp.bits.meta
-  }
-
   // metadata write
   io.meta.write.bits.idx := idx
   io.meta.write.bits.way_en := way_en
@@ -454,19 +449,22 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state := s_M_R_RESP
   }
   when(state === s_M_R_RESP && io.meta.resp.valid) {
+    meta := io.meta.resp.bits.meta
     when(io.meta.resp.bits.hit) {
       when(io.meta.resp.bits.meta.tagFlag === UInt(0)) {
-        io.xact.resp.bits.tagFlag := UInt(0)
         when(TCTagOp.isRead(xact.op)) {
           // R/F+R hit,t==0
+          io.xact.resp.bits.tagFlag := UInt(0)
           io.xact.resp.valid := Bool(true)
           state := s_IDLE
         }.otherwise{
           // W/C hit,t==0
           if(earlyAck) {
+            io.xact.resp.bits.tagFlag := write_tag
             xact_resp_done := Bool(true)
             io.xact.resp.valid := Bool(true)
           }
+          meta.tagFlag := write_tag
           xact.op := TCTagOp.Create // Use Create to denote t==0
           state := s_D_RW
         }
@@ -495,6 +493,9 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       xact_resp_done := Bool(true)
       io.xact.resp.bits.data := write_buf(row)
       io.xact.resp.valid := Bool(true)
+    }
+    when(TCTagOp.isRead(xact.op)) {
+      xact.data := write_buf(row) // store read data for final xact.resp
     }
     state := s_D_BW
   }
@@ -555,6 +556,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }
   }
   when(state === s_M_W && io.meta.write.fire()) {
+    io.xact.resp.bits.data := xact.data // for F+R
     io.xact.resp.valid := !xact_resp_done
     state := s_IDLE
   }
