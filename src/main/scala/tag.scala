@@ -151,9 +151,11 @@ class TagUtil(
   // convert physical address to tag table address
   def pa2tta(addr: UInt): UInt = (addr >> unTagBits) + UInt(tableBase)
 
-  // convert physical address to tag map 0 address
+  // convert physical address to tag map 0 address(a) / bit offset(b)
   def pa2tm0a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + UInt(map0Base)
+  def pa2tm0b(addr: UInt): UInt = addr(unTagBits + unMapBits - 1, unTagBits + unMapBits - 3)
 
-  // convert physical address to tag map 1 address
+  // convert physical address to tag map 1 address(a) / bit offset(b)
   def pa2tm1a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
+  def pa2tm1b(addr: UInt): UInt = addr(unTagBits + unMapBits + unMapBits - 1, unTagBits + unMapBits + unMapBits - 3)
 }
