@@ -29,6 +29,9 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 
   val earlyAck = p(TCEarlyAck) // early ack optimization to reduce delay
 
+  val rowTags = rowBits / tgHelper.wordBits
+  val rowTagBits = tgBits * rowTags
+
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.withTag && innerTLParams.withTag)
   require(outerTLId == p(TLId))
@@ -569,7 +572,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 class TCXact(implicit p: Parameters) extends TCBundle()(p) with HasTCAddr {
   val rw = Bool() // r:0 w:1
   val mem_data = UInt(width = rowBits)
-  val mem_mask = UInt(width = rowBytes)
+  val mem_mask = UInt(width = refillCycles*rowTags) // expanded for mask calculation
   val tt_data = UInt(width = rowBits)
   val tt_tagFlag = Bool()
   val tm0_data = UInt(width = 8)
@@ -578,7 +581,9 @@ class TCXact(implicit p: Parameters) extends TCBundle()(p) with HasTCAddr {
   val tm1_tagFlag = Bool()
 }
 
-class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
+class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
+    with HasDataBeatCounters
+{
   val io = new Bundle {
     val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => p(InnerTLId)}))
     val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => p(OuterTLId)}))
@@ -605,7 +610,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
   val tc_state_next = tc_state
   tc_state := tc_state_next
   val tc_xact = Reg(new TCXact)                 // record of tag cache search procedure
-  val tc_req_valid = Wire(Bool())               // start the tag cache search transaction
+  val tc_req_valid = Reg(init = Bool(false))    // start the tag cache search transaction
   val tx_req_fire = Reg(init = Bool(false))     // tag transaction request fired
   val tx_resp_hit = Reg(init = Bool(false))     // tag cache search hit
   val tx_resp_valid = Reg(init = Bool(false))   // response from tag transaction trackers ready
@@ -615,6 +620,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
       tc_xact.mem_mask(i) && tc_xact.mem_data(i*8+7,i*8) =/= tc_xact.tt_data(i*8+7,i*8)
     }).reduce(_ || _)
   val tc_tt_addr = tgHelper.pa2tta(tc_xact.addr)
+  val tc_tt_valid = Reg(init = Bool(false))     // identify when tc_xact.tt_data is ready
   val tc_tm0_addr = tgHelper.pa2tm0a(tc_xact.addr)
   val tc_tm0_bit_index = tgHelper.pa2tm0b(tc_xact.addr)
   val tc_tm0_byte_index = tgHelper.pa2tm0r(tc_xact.addr, rowOffBits)
@@ -708,43 +714,46 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
   }
 
   // tag transaction response
-  switch(tc_state) {
-    is(ts_TT_R) {
-      tc_xact.tt_data := io.tc.resp.bits.data
-      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TM0_R) {
-      tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
-      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TM1_FR) {
-      tc_xact.tm1_data := io.tc.resp.bits.data >> (tc_tm1_byte_index * UInt(8))
-      tc_xact.tm1_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TM0_FR) {
-      tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
-      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TT_FR) {
-      tc_xact.tt_data := io.tc.resp.bits.data
-      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TM0_C) {
-      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TT_C) {
-      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TT_W) {
-      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
-    }
-    is(ts_TM0_W) {
-      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+  when(io.tc.resp.valid) {
+    switch(tc_state) {
+      is(ts_TT_R) {
+        tc_xact.tt_data := io.tc.resp.bits.data
+        tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TM0_R) {
+        tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
+        tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TM1_FR) {
+        tc_xact.tm1_data := io.tc.resp.bits.data >> (tc_tm1_byte_index * UInt(8))
+        tc_xact.tm1_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TM0_FR) {
+        tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
+        tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TT_FR) {
+        tc_xact.tt_data := io.tc.resp.bits.data
+        tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TM0_C) {
+        tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TT_C) {
+        tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TT_W) {
+        tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+      }
+      is(ts_TM0_W) {
+        tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+      }
     }
   }
 
   // -------------- the shared state machine ----------------- //
   when(tc_state === ts_IDLE && tc_req_valid) {
+    tc_tt_valid := Bool(false)
     when(Bool(true)) {          // most tagged
       tc_state_next := ts_TT_R
     }.otherwise{                // most untagged
@@ -754,6 +763,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
   when(tx_resp_valid) {
     when(tc_state === ts_TT_R) {
       when(tx_resp_hit) {
+        tc_tt_valid := Bool(true)
         when(!tc_xact.rw) { // MEM.R TT.hit
           tc_state_next := ts_IDLE
         }.elsewhen(tc_wdata_valid) { // MEM.W TT.hit
@@ -767,36 +777,43 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
     }
     when(tc_state === ts_TM0_R) {
       when(tx_resp_hit) {
-        when(!tc_xact.rw) { // MEM.R TM0.hit
-          tc_state_next := Mux(tc_tm0_bit, ts_TT_FR, ts_IDLE)
-        }.elsewhen(tc_wdata_valid) { // MEM.W TM0.hit
-          tc_state_next := Mux(tc_tm0_bit, ts_TT_W,
-                           Mux(tc_tt_update, ts_TT_C, ts_IDLE))
+        tc_tt_valid := !tc_tm0_bit
+        when(tc_tm0_bit) { // TM0.hit TM0=1
+          tc_state_next := ts_TT_FR
+        }.elsewhen(!tc_xact.rw) { // MEM.R TM0.hit TM0=0
+          tc_state_next := ts_IDLE
+        }.elsewhen(tc_wdata_valid) { // MEM.W TM0.hit TM0=0
+          tc_state_next := Mux(tc_tt_update, ts_TT_C, ts_IDLE)
         }
       }.otherwise{ // TM0.miss
         tc_state_next := ts_TM1_FR
       }
     }
     when(tc_state === ts_TM1_FR) {
-      when(!tc_xact.rw) { // MEM.R
-        tc_state_next := Mux(tc_tm1_bit, ts_TM0_FR, ts_IDLE)
-      }.elsewhen(tc_wdata_valid) { // MEM.W
-        tc_state_next := Mux(tc_tm1_bit, ts_TM0_FR,
-                         Mux(tc_tt_update, ts_TM0_C, ts_IDLE))
+      tc_tt_valid := !tc_tm1_bit
+      when(tc_tm1_bit) { // TM1=1
+        tc_state_next := ts_TM0_FR
+      }.elsewhen(!tc_xact.rw) { // MEM.R TM1=0
+        tc_state_next := ts_IDLE
+      }.elsewhen(tc_wdata_valid) { // MEM.W TM1=0
+        tc_state_next := Mux(tc_tt_update, ts_TM0_C, ts_IDLE)
       }
     }
     when(tc_state === ts_TM0_FR) {
-      when(!tc_xact.rw) { // MEM.R
-        tc_state_next := Mux(tc_tm0_bit, ts_TT_FR, ts_IDLE)
-      }.elsewhen(tc_wdata_valid) { // MEM.W
-        tc_state_next := Mux(tc_tm0_bit, ts_TT_FR,
-                         Mux(tc_tt_update, ts_TT_C, ts_IDLE))
+      tc_tt_valid := !tc_tm0_bit
+      when(tc_tm0_bit) { // TM0=1
+        tc_state_next := ts_TT_FR
+      }.elsewhen(!tc_xact.rw) { // MEM.R TM0=0
+        tc_state_next := ts_IDLE
+      }.elsewhen(tc_wdata_valid) { // MEM.W TM0=0
+        tc_state_next := Mux(tc_tt_update, ts_TT_C, ts_IDLE)
       }
     }
     when(tc_state === ts_TM0_C) {
       tc_state_next := ts_TT_C
     }
     when(tc_state === ts_TT_FR) {
+      tc_tt_valid := Bool(true)
       when(!tc_xact.rw) { // MEM.R
         tc_state_next := ts_IDLE
       }.elsewhen(tc_wdata_valid) { // MEM.W
@@ -816,10 +833,61 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
       tc_state_next := ts_IDLE
     }
   }
-
 }
 
 class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p) {
+
+  // ------------ tag cache state machine states -------------- //
+  val ms_IDLE :: ms_IREL :: ms_OACQ :: Nil = Enum(UInt(), 3)
+  val mt_state = Reg(init = ms_IDLE)
+
+  // buffer shared between irel and oacq
+  val irel_rows = innerDataBits / rowBits
+  val oacq_rows = outerDataBits / rowBits
+  val buf = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
+
+  // input Release channel
+  val irel_cnt = inner.release.bits.addr_beat
+  val irel_done = connectIncomingDataBeatCounter(inner.release)
+  val irel_tag = Wire(Vec(refillCycles, UInt(width=rowTagBits)))
+  val irel_tag_mask = Wire(Vec(refillCycles, UInt(rowTags)))
+
+  // assign initial value
+  irel_tag := irel_tag.fromBits(UInt(0, refillCycles*rowTagBits))
+  irel_tag_mask := irel_tag_mask.fromBits(UInt(0, refillCycles*rowTags))
+  when(state === ms_IREL) {
+    (0 until refillCycles).foreach( i => {
+      irel_tag(i) := tc_xact.mem_data(i*rowTagBits+rowTagBits-1, i*rowTagBits)
+      irel_tag_mask(i) := tc_xact.mem_mask(i*rowTagBits+rowTags-1, i*rowTags)
+  }
+
+
+
+  val (oacq_cnt, ocaq_done_wire) = connectOutgoingDataBeatCounter(outer.acquire)
+  val ocq_done = Reg(init = Bool(false))
+  val ignt_done = Reg(init = Bool(false))
+
+  val irel_rows = innerDataBits / rowBits
+  val oacq_rows = outerDataBits / rowBits
+  val buf = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
+
+  when(inner.release.fire()) {
+    (0 until irel_rows).foreach( i => {
+      buf(irel_cnt*UInt(irel_rows) + UInt(i)) := inner.release.bits.data
+  }
+  inner.release.ready := mt_state === ms_IDLE && tc_state === ts_IDLE
+
+
+  // ------------ memory tracker state machine ---------------- //
+  when(mt_state === ms_IDLE && inner.release.fire()) {
+    mt_state := Mux(irel_done, ms_IREL, ms_OACQ)
+  }
+  when(mt_state === ms_IREL && irel_done) {
+    mt_state := ms_OACQ
+  }
+  when(mt_state === ms_OACQ && oacq_done && ignt_done) {
+    mt_state := ms_IDLE
+  }
 
 }
 
@@ -827,14 +895,15 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
 }
 
-/*
-
 
 ////////////////////////////////////////////////////////////////
 // Top level of the Tag Cache
 
 class TagCache(implicit p: Parameters) extends TCTLModule()(p) {
   val io = new ManagerTLIO
+
+  val arBAddrBits = log2Up(nARBufBeats)
+  val gBAddrBits = log2Up(nGBufBeats)
 
   val meta      = Module(new TCMetadataArray()(tcTagTLParams))
   val data      = Module(new TCDataArray()(tcTagTLParams))
@@ -849,7 +918,7 @@ class TagCache(implicit p: Parameters) extends TCTLModule()(p) {
 }
 
 
-
+/*
 /////////////////////////////
 
 
