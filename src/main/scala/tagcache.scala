@@ -583,6 +583,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
     val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => p(InnerTLId)}))
     val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => p(OuterTLId)}))
     val tc = new TCTagXactIO
+    val tc_write = Bool(OUTPUT) // enforce temporal write order
   }
   def innerTL: ManagerTileLinkIO = io.inner
   def outerTL: ClientUncachedTileLinkIO = io.outer
@@ -613,7 +614,14 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
     (0 until rowBytes).map( i => {
       tc_xact.mem_mask(i) && tc_xact.mem_data(i*8+7,i*8) =/= tc_xact.tt_data(i*8+7,i*8)
     }).reduce(_ || _)
+  val tc_tt_addr = tgHelper.pa2tta(tc_xact.addr)
+  val tc_tm0_addr = tgHelper.pa2tm0a(tc_xact.addr)
+  val tc_tm0_bit_index = tgHelper.pa2tm0b(tc_xact.addr)
+  val tc_tm0_byte_index = tgHelper.pa2tm0r(tc_xact.addr, rowOffBits)
   val tc_tm0_bit = tc_xact.tm0_data(tgHelper.pa2tm0b(tc_xact.addr))
+  val tc_tm1_addr = tgHelper.pa2tm1a(tc_xact.addr)
+  val tc_tm1_bit_index = tgHelper.pa2tm1b(tc_xact.addr)
+  val tc_tm1_byte_index = tgHelper.pa2tm1r(tc_xact.addr, rowOffBits)
   val tc_tm1_bit = tc_xact.tm1_data(tgHelper.pa2tm1b(tc_xact.addr))
 
   when(tc_state =/= tc_state_next) {
@@ -628,6 +636,112 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) {
     tx_resp_valid := Bool(true)
   }
 
+  // tag transaction request
+  io.tc_write := Bool(false)
+  io.tc.req.valid := !tx_req_fire && tc_state =/= ts_IDLE
+  io.tc.req.bits.id   := UInt(id)
+  io.tc.req.bits.data := UInt(0)
+  io.tc.req.bits.mask := UInt(0)
+  io.tc.req.bits.addr := UInt(0)
+  io.tc.req.bits.op   := UInt(0)
+  switch(tc_state) {
+    is(ts_TT_R) {
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := TCTagOp.Read
+    }
+    is(ts_TM0_R) {
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := TCTagOp.Read
+    }
+    is(ts_TM1_FR) {
+      io.tc.req.bits.addr := tc_tm1_addr
+      io.tc.req.bits.op   := TCTagOp.FetchRead
+    }
+    is(ts_TM0_FR) {
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := TCTagOp.FetchRead
+    }
+    is(ts_TT_FR) {
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := TCTagOp.FetchRead
+    }
+    is(ts_TM0_C) {
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := TCTagOp.Create
+    }
+    is(ts_TT_C) {
+      io.tc.req.bits.data := tc_xact.mem_data
+      io.tc.req.bits.mask := tc_xact.mem_mask
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := TCTagOp.Create
+      io.tc_write         := Bool(true)
+    }
+    is(ts_TT_W) {
+      io.tc.req.bits.data := tc_xact.mem_data
+      io.tc.req.bits.mask := tc_xact.mem_mask
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := TCTagOp.Write
+      io.tc_write         := Bool(true)
+    }
+    is(ts_TM0_W) {
+      io.tc.req.bits.data :=
+        Mux(tc_xact.tt_tagFlag,
+          tc_xact.tm0_data | (UInt(1,8) << tc_tm0_bit_index),
+          tc_xact.tm0_data & ~(UInt(1,8) << tc_tm0_bit_index)
+        ) << (tc_tm0_byte_index * UInt(8))
+      io.tc.req.bits.mask := UInt(1,rowBytes) << tc_tm0_byte_index
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := TCTagOp.Write
+      io.tc_write         := Bool(true)
+    }
+    is(ts_TM1_W) {
+      io.tc.req.bits.data :=
+        Mux(tc_xact.tm0_tagFlag,
+          tc_xact.tm1_data | (UInt(1,8) << tc_tm1_bit_index),
+          tc_xact.tm1_data & ~(UInt(1,8) << tc_tm1_bit_index)
+        ) << (tc_tm1_byte_index * UInt(8))
+      io.tc.req.bits.mask := UInt(1,rowBytes) << tc_tm1_byte_index
+      io.tc.req.bits.addr := tc_tm1_addr
+      io.tc.req.bits.op   := TCTagOp.Write
+      io.tc_write         := Bool(true)
+    }
+  }
+
+  // tag transaction response
+  switch(tc_state) {
+    is(ts_TT_R) {
+      tc_xact.tt_data := io.tc.resp.bits.data
+      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TM0_R) {
+      tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
+      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TM1_FR) {
+      tc_xact.tm1_data := io.tc.resp.bits.data >> (tc_tm1_byte_index * UInt(8))
+      tc_xact.tm1_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TM0_FR) {
+      tc_xact.tm0_data := io.tc.resp.bits.data >> (tc_tm0_byte_index * UInt(8))
+      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TT_FR) {
+      tc_xact.tt_data := io.tc.resp.bits.data
+      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TM0_C) {
+      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TT_C) {
+      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TT_W) {
+      tc_xact.tt_tagFlag := io.tc.resp.bits.tagFlag
+    }
+    is(ts_TM0_W) {
+      tc_xact.tm0_tagFlag := io.tc.resp.bits.tagFlag
+    }
+  }
 
   // -------------- the shared state machine ----------------- //
   when(tc_state === ts_IDLE && tc_req_valid) {
