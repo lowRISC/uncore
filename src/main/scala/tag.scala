@@ -43,6 +43,8 @@ class TagUtil(
   def map0Base  = memBase + memSize - map0Size          // base address of tag map 0
   def map1Size  = map0Size / mapRatio                   // size of tag map 1
   def map1Base  = memBase + memSize - map1Size          // base address of tag map 1
+  def cacheBlockTagBits = cacheBlockBytes / wordBytes * normTagBits // tag size of a cache block
+  def cacheBlockTagBytes = cacheBlockTagBits / 8
 
   require(isPow2(mapRatio))
   require(mapRatio >= tagRatio)                         // no extra space for map
@@ -136,6 +138,12 @@ class TagUtil(
     s / tagWordBits * wordBits
   }
 
+  // calculate the tag size of a data size
+  def sizeOfTag(s: Int): Int = {
+    require(s >= wordBits && s % wordBits == 0)
+    s / wordBits * tagBits
+  }
+
   // calculate the extended mask size with tags
   def maskSizeWithTag(s: Int): Int = {
     require(s >= wordBytes && s % wordBytes == 0)
@@ -148,8 +156,9 @@ class TagUtil(
     s / (wordBytes + 1) * wordBytes
   }
 
-  // convert physical address to tag table address
+  // convert physical address to tag table address / row byte index
   def pa2tta(addr: UInt): UInt = (addr >> unTagBits) + UInt(tableBase)
+  def pa2ttr(addr: UInt, rbo: Int): UInt = addr(unTagBits + rbo - 1, unTagBits)
 
   // convert physical address to tag map 0 address(a) / row byte index / bit offset(b)
   def pa2tm0a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + UInt(map0Base)
