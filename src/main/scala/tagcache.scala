@@ -845,31 +845,27 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
 class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p) {
 
   // ------------ tag cache state machine states -------------- //
-  val ms_IDLE :: ms_IREL :: ms_OACQ :: Nil = Enum(UInt(), 3)
+  val ms_IDLE :: ms_IREL :: ms_OACQ :: ms_IGNT :: Nil = Enum(UInt(), 4)
   val mt_state = Reg(init = ms_IDLE)
 
   val xact = Reg(new BufferedReleaseFromSrc()(p.alterPartial({ case TLId => innerTLId })))
 
-  // input Release channel
-  val irel_done = Reg(next = connectIncomingDataBeatCounter(inner.release))
+  val irel_done = connectIncomingDataBeatCounter(inner.release)
+  val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
 
-  val (oacq_cnt, oacq_done_wire) = connectOutgoingDataBeatCounter(outer.acquire)
-  val oacq_done = Reg(init = Bool(false))
-  val ignt_done = Reg(init = Bool(false))
-
+  // inner release
   when(inner.release.fire()) {
     xact.data_buffer(inner.release.bits.addr_beat) := inner.release.bits.data
   }
-  inner.release.ready := mt_state === ms_IDLE && tc_state === ts_IDLE
+  inner.release.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IREL
 
-  // collect data and tag
   (0 until innerDataBeats).foreach(i => {
     i_data(i) := tgHelper.removeTag(xact.data_buffer(i))
     i_tag(i) := tgHelper.extractTag(xact.data_buffer(i))
   })
 
   // output acquire
-  outer.acquire.valid := mt_state === ms_OACQ && !oacq_done
+  outer.acquire.valid := mt_state === ms_OACQ
   o_data := o_data.fromBits(i_data.toBits)
   outer.acquire.bits := PutBlock(
     client_xact_id = UInt(id),
@@ -878,16 +874,13 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     data = o_data(oacq_cnt)
   )(p.alterPartial({ case TLId => outerTLId }))
 
-  when(mt_state === ms_OACQ && oacq_done_wire) {
-    oacq_done := Bool(true)
-  }
-
   // input grant
-  inner.grant.valid := mt_state === ms_OACQ && !ignt_done
+  inner.grant.valid := mt_state === ms_IGNT && outer.grant.valid
   inner.grant.bits := coh.makeGrant(xact)
   when(mt_state === ms_OACQ && inner.grant.fire()) {
-    ignt_done := Bool(true)
+    ignt_done_reg := Bool(true)
   }
+  outer.grant.ready := mt_state === ms_IGNT && inner.grant.ready
 
   // tag
   tc_req_valid := mt_state === ms_IDLE && inner.release.fire()
@@ -898,7 +891,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     tc_xact.addr := inner.release.bits.full_addr()
   }
 
-  when(mt_state === ms_IREL && irel_done) {
+  when(mt_state === ms_OACQ && !tc_wdata_valid) {
     tc_xact.mem_data := i_tag.toBits << (tc_tt_byte_index * UInt(8))
     tc_xact.mem_mask := (Vec.fill(tgHelper.cacheBlockTagBytes){Bool(true)}).toBits << tc_tt_byte_index
     tc_wdata_valid := Bool(true)
@@ -907,16 +900,15 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.release.fire()) {
     xact := inner.release.bits
-    ignt_done := !inner.release.bits.requiresAck() // no need to ack grant
-    oacq_done := !inner.release.bits.hasMultibeatData() // empty release
     mt_state := Mux(irel_done, ms_IREL, ms_OACQ)
   }
   when(mt_state === ms_IREL && irel_done) {
     mt_state := ms_OACQ
   }
-  when(mt_state === ms_OACQ && oacq_done && ignt_done) {
-    oacq_done := Bool(false)
-    ignt_done := Bool(false)
+  when(mt_state === ms_OACQ && oacq_done) {
+    mt_state := Mux(xact.requiresAck(), ms_IGNT, ms_IDLE)
+  }
+  when(mt_state === ms_IGNT && inner.grant.fire()) {
     mt_state := ms_IDLE
   }
 
@@ -924,6 +916,42 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
 class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p) {
 
+  // ------------ tag cache state machine states -------------- //
+  val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Num(UInt(), 6)
+  val mt_state = Reg(init = ms_IDLE)
+
+  val xact  = Reg(new AcquireFromSrc()(p.alterPartial({ case TLId => innerTLId })))
+  val data  = Reg(Vec(refillCycles, UInt(width=rowBits)))
+  val tag   = Reg(Vec(refillCycles, UInt(width=rowTagBits)))
+  val tmask = Reg(Vec(refillCycles, UInt(width=rowTags)))
+
+  val iacq_done = connectIncomingDataBeatCounter(inner.acquire)
+  val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant)
+  val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
+  val ognt_done = connectIncomingDataBeatCounter(outer.grant)
+
+
+
+  // ------------ memory tracker state machine ---------------- //
+  when(mt_state === ms_IDLE && inner.acquire.fire()) {
+    xact := inner.acquire.bits
+    mt_state := Mux(iacq_done, ms_IACQ, ms_OACQ)
+  }
+  when(mt_state === ms_IACQ && iacq_done) {
+    mt_state := ms_OACQ
+  }
+  when(mt_state === ms_OACQ && oacq_done) {
+    mt_state := ms_OGNT
+  }
+  when(mt_state === ms_OGNT && ognt_done) {
+    mt_state := ms_IGNT
+  }
+  when(mt_state === ms_IGNT && ignt_done) {
+    mt_state := Mux(xact.requiresAck(), ms_IFIN, ms_IDLE)
+  }
+  when(mt_state === ms_IFIN && inner.finish.valid)
+    mt_state := ms_IDLE
+  }
 }
 
 
