@@ -260,8 +260,8 @@ trait HasDataBeatCounters {
   /** Returns done but not cnt. Use the addr_beat subbundle instead of cnt for beats on 
     * incoming channels in case of network reordering.
     */
-  def connectIncomingDataBeatCounter[T <: TileLinkChannel](in: DecoupledIO[T]): Bool =
-    connectDataBeatCounter(in.fire(), in.bits, UInt(0))._2
+  def connectIncomingDataBeatCounter[T <: TileLinkChannel](in: DecoupledIO[T], en: Bool = Bool(true)): Bool =
+    connectDataBeatCounter(in.fire() && en, in.bits, UInt(0))._2
 
   /** Counter for beats on incoming DecoupledIO[LogicalNetworkIO[]]s returns done */
   def connectIncomingDataBeatCounterWithHeader[T <: TileLinkChannel](in: DecoupledIO[LogicalNetworkIO[T]]): Bool =

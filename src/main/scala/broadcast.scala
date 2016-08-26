@@ -214,7 +214,7 @@ class BroadcastAcquireTracker(trackerId: Int)
 
   val collect_iacq_data = Reg(init=Bool(false))
   val iacq_data_valid = Reg(init=Bits(0, width = innerDataBeats))
-  val iacq_data_done = connectIncomingDataBeatCounter(io.inner.acquire)
+  val iacq_data_done = connectIncomingDataBeatCounter(io.inner.acquire, io.alloc.iacq || collect_iacq_data)
   val irel_data_done = connectIncomingDataBeatCounter(io.inner.release)
   val (ignt_data_cnt, ignt_data_done) = connectOutgoingDataBeatCounter(io.inner.grant)
   val (oacq_data_cnt, oacq_data_done) = connectOutgoingDataBeatCounter(io.outer.acquire)
