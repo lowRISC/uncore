@@ -572,7 +572,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 class TCXact(implicit p: Parameters) extends TCBundle()(p) with HasTCAddr {
   val rw = Bool() // r:0 w:1
   val mem_data = UInt(width = rowBits)
-  val mem_mask = UInt(width = refillCycles*rowTags) // expanded for mask calculation
+  val mem_mask = UInt(width = rowBytes)
   val tt_data = UInt(width = rowBits)
   val tt_tagFlag = Bool()
   val tm0_data = UInt(width = 8)
@@ -593,11 +593,6 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   def inner: ManagerTileLinkIO = io.inner
   def outer: ClientUncachedTileLinkIO = io.outer
   val coh = ManagerMetadata.onReset
-  val i_data = Wire(Vec(innerDataBeats, UInt(width=innerDataBits)))
-  val i_tag  = Wire(Vec(innerDataBeats, UInt(width=tgHelper.sizeOfTag(innerDataBits))))
-  val o_data = Wire(Vec(outerDataBeats, UInt(width=outerDataBits)))
-  val irel_rows = innerDataBits / rowBits
-  val oacq_rows = outerDataBits / rowBits
 
   // ------------ tag cache state machine states -------------- //
   // TT.R               read tag table
@@ -849,6 +844,9 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val mt_state = Reg(init = ms_IDLE)
 
   val xact = Reg(new BufferedReleaseFromSrc()(p.alterPartial({ case TLId => innerTLId })))
+  val i_data = Wire(Vec(innerDataBeats, UInt(width=innerDataBits)))
+  val i_tag  = Wire(Vec(innerDataBeats, UInt(width=tgHelper.sizeOfTag(innerDataBits))))
+  val o_data = Wire(Vec(outerDataBeats, UInt(width=outerDataBits)))
 
   val irel_done = connectIncomingDataBeatCounter(inner.release)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
@@ -920,17 +918,49 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Num(UInt(), 6)
   val mt_state = Reg(init = ms_IDLE)
 
+  val i_rows = innerDataBits / rowBits
+  val o_rows = outerDataBits / rowBits
   val xact  = Reg(new AcquireFromSrc()(p.alterPartial({ case TLId => innerTLId })))
   val data  = Reg(Vec(refillCycles, UInt(width=rowBits)))
   val tag   = Reg(Vec(refillCycles, UInt(width=rowTagBits)))
   val tmask = Reg(Vec(refillCycles, UInt(width=rowTags)))
 
+  val iacq_cnt = inner.acquire.bits.addr_beat
   val iacq_done = connectIncomingDataBeatCounter(inner.acquire)
   val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
   val ognt_done = connectIncomingDataBeatCounter(outer.grant)
 
+  // inner acquire
+  when(inner.acquire.fire()) {
+    val iacq_data = tgHelper.removeTag(inner.acquire.bits.data)
+    val iacq_tag = tgHelper.extractTag(inner.acquire.bits.data)
+    (0 until i_rows).foreach( i => {
+      data(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_data(i*rowBits+rowBits-1,i*rowBits)
+      tag(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_tag(i*rowTagBits+rowTagBits-1,i*rowTagBits)
+    })
+  }
+  inner.acquire.ready : (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
 
+  // outer acquire
+  outer.acquire.valid := mt_state === ms_OACQ
+  outer.acquire.bits := Acquire(
+    is_builtin_type = Bool(true),
+    a_type = Mux(xact.isBuiltInType(), xact.a_type, Acquire.getBlockType),
+    client_xact_id = UInt(id),
+    addr_block = xact.addr_block,
+    addr_beat = oacq_cnt,
+    data = (Vec((0 until o_rows).map(i => data(oacq_cnt*UInt(o_rows)+UInt(i))))).toBits,
+    union = Mux(xact.isBuiltInType(),
+      Acquire.makeUnion( // re-assemble union to rectify wmask
+        a_type = xact.a_type,
+        addr_byte = xact.addr_byte,
+        operand_size = xact.op_size,
+        opcode = xact.op_code,
+        wmask = tgHelper.removeTagMask(xact.wmask),
+        alloc = Bool(true)
+      ),
+      Cat(MT_Q, M_XRD, Bool(true)))) // coherent Acquire must be getBlock?
 
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
