@@ -875,9 +875,6 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // input grant
   inner.grant.valid := mt_state === ms_IGNT && outer.grant.valid
   inner.grant.bits := coh.makeGrant(xact)
-  when(mt_state === ms_OACQ && inner.grant.fire()) {
-    ignt_done_reg := Bool(true)
-  }
   outer.grant.ready := mt_state === ms_IGNT && inner.grant.ready
 
   // tag
@@ -915,7 +912,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTracker(id)(p) {
 
   // ------------ tag cache state machine states -------------- //
-  val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Num(UInt(), 6)
+  val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Enum(UInt(), 6)
   val mt_state = Reg(init = ms_IDLE)
 
   val i_rows = innerDataBits / rowBits
@@ -929,6 +926,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val iacq_done = connectIncomingDataBeatCounter(inner.acquire)
   val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
+  val ognt_cnt = outer.grant.bits.addr_beat
   val ognt_done = connectIncomingDataBeatCounter(outer.grant)
 
   // inner acquire
@@ -940,7 +938,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
       tag(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_tag(i*rowTagBits+rowTagBits-1,i*rowTagBits)
     })
   }
-  inner.acquire.ready : (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
+  inner.acquire.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
 
   // outer acquire
   outer.acquire.valid := mt_state === ms_OACQ
@@ -954,13 +952,42 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     union = Mux(xact.isBuiltInType(),
       Acquire.makeUnion( // re-assemble union to rectify wmask
         a_type = xact.a_type,
-        addr_byte = xact.addr_byte,
-        operand_size = xact.op_size,
-        opcode = xact.op_code,
-        wmask = tgHelper.removeTagMask(xact.wmask),
+        addr_byte = xact.addr_byte(),
+        operand_size = xact.op_size(),
+        opcode = xact.op_code(),
+        wmask = tgHelper.removeTagMask(xact.wmask()),
         alloc = Bool(true)
       ),
       Cat(MT_Q, M_XRD, Bool(true)))) // coherent Acquire must be getBlock?
+
+  // outer grant
+  outer.grant.ready := mt_state === ms_OGNT
+  when(outer.grant.fire()) {
+    val ognt_data = outer.grant.bits.data
+    (0 until o_rows).foreach( i => {
+      data(ognt_cnt*UInt(o_rows) + UInt(i)) := ognt_data(i*rowBits+rowBits-1,i*rowBits)
+    })
+  }
+
+  // inner grant
+  inner.grant.valid := mt_state === ms_IGNT
+  val ignt_tag = Wire(UInt(width=rowTagBits))
+  ignt_tag := tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
+  val innerTagBits = UInt(tgHelper.sizeOfTag(innerDataBits))
+  val ignt_data =
+    tgHelper.insertTags(
+      (Vec((0 until i_rows).map(i => data(ignt_cnt*UInt(i_rows)+UInt(i))))).toBits,
+      ignt_tag(ignt_cnt*innerTagBits + innerTagBits - UInt(1), ignt_cnt*innerTagBits)
+    )
+  inner.grant.bits := coh.makeGrant(
+    acq = xact,
+    manager_xact_id = UInt(id),
+    addr_beat = ignt_cnt,
+    data = ignt_data
+  )
+
+  // inner finish
+  inner.finish.ready := mt_state === ms_IFIN
 
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
@@ -977,9 +1004,9 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     mt_state := ms_IGNT
   }
   when(mt_state === ms_IGNT && ignt_done) {
-    mt_state := Mux(xact.requiresAck(), ms_IFIN, ms_IDLE)
+    mt_state := Mux(inner.grant.bits.requiresAck(), ms_IFIN, ms_IDLE)
   }
-  when(mt_state === ms_IFIN && inner.finish.valid)
+  when(mt_state === ms_IFIN && inner.finish.valid) {
     mt_state := ms_IDLE
   }
 }
