@@ -588,6 +588,9 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     val inner = new ManagerTileLinkIO()(p.alterPartial({case TLId => p(InnerTLId)}))
     val outer = new ClientUncachedTileLinkIO()(p.alterPartial({case TLId => p(OuterTLId)}))
     val tc = new TCTagXactIO
+    val tl_block = Bool(OUTPUT)        // start to block other tl transactions
+    val tl_active = Bool(OUTPUT)       // actively serving a tl transaction
+    val tl_addr_block = UInt(OUTPUT, width=inner.tlBlockAddrBits) // for cache line comparison
     val tc_write = Bool(OUTPUT) // enforce temporal write order
   }
   def inner: ManagerTileLinkIO = io.inner
@@ -892,6 +895,11 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     tc_wdata_valid := Bool(true)
   }
 
+  // tl conflicts
+  io.tl_active := !inner.release.ready
+  io.tl_block := !(mt_state === ms_IDLE && tc_state === ts_IDLE)
+  io.tl_addr_block := xact.addr_block
+
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.release.fire()) {
     xact := inner.release.bits
@@ -1039,6 +1047,11 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     }
   }
 
+  // tl conflicts
+  io.tl_active := !inner.acquire.ready
+  io.tl_block := !(mt_state === ms_IDLE && tc_state === ts_IDLE)
+  io.tl_addr_block := xact.addr_block
+
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
     xact := inner.acquire.bits
@@ -1065,20 +1078,70 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 ////////////////////////////////////////////////////////////////
 // Top level of the Tag Cache
 
-class TagCache(implicit p: Parameters) extends TCModule()(p) {
+class TagCache(implicit p: Parameters) extends TCModule()(p)
+  with HasCoherenceAgentWiringHelpers
+{
   val io = new ManagerTLIO
 
   val meta      = Module(new TCMetadataArray()(tcTagTLParams))
   val data      = Module(new TCDataArray()(tcTagTLParams))
 
-  val memXactTrackerList =
-    (0               until nReleaseTransactors).map(id => Module(new TCMemReleaseTracker(id))) ++
+  val relTrackers =
+    (0               until nReleaseTransactors).map(id => Module(new TCMemReleaseTracker(id)))
+  val acqTrackers =
     (nReleaseTransactors until nMemTransactors).map(id => Module(new TCMemAcquireTracker(id)))
+  val memTrackers = relTrackers ++ acqTrackers
 
-  val tagXactTrackerList = (nTagTransactors until nTagTransactors + nMemTransactors).map(id =>
+  val tagTrackers = (nMemTransactors until nMemTransactors + nTagTransactors).map(id =>
     Module(new TCTagXactTracker(id)(tcTagTLParams)))
 
-  val writeback = Module(new TCWritebackUnit(nTagTransactors + nMemTransactors)(tcTagTLParams))
+  val wb = Module(new TCWritebackUnit(nMemTransactors + nTagTransactors)(tcTagTLParams))
+
+  // connect TileLink outputs
+  val outer_arb = Module(new ClientUncachedTileLinkIOArbiter(nMemTransactors + nTagTransactors + 1)
+                    (p.alterPartial({ case TLId => p(OuterTLId) })))
+  outer_arb.io.in <> memTrackers.map(_.outer) ++ tagTrackers.map(_.io.tl) :+ wb.io.tl
+  io.outer <> outer_arb.io.out
+
+  // connect TileLink inputs
+  def lock[T <: TileLinkChannel](o:T) = o.hasMultibeatData()
+  // when acq and rel for the same block, rel first
+  val acq_rel_conflict =
+    io.inner.acquire.valid &&
+    io.inner.release.valid &&
+    io.inner.acquire.bits.addr_block === io.inner.release.bits.addr_block
+  // block any acq or rel when any memTracker is active on the same block
+  val tl_rel_active =
+    Vec(relTrackers.map(_.io.tl_active)).toBits &
+    Vec(relTrackers.map(_.io.tl_addr_block === io.inner.release.bits.addr_block)).toBits
+  val tl_acq_active =
+    Vec(acqTrackers.map(_.io.tl_active)).toBits &
+    Vec(acqTrackers.map(_.io.tl_addr_block === io.inner.acquire.bits.addr_block)).toBits
+  val tl_rel_block =
+    Vec(acqTrackers.map(_.io.tl_block)).toBits &
+    Vec(acqTrackers.map(_.io.tl_addr_block === io.inner.release.bits.addr_block)).toBits
+  val tl_acq_block =
+    Vec(relTrackers.map(_.io.tl_block)).toBits &
+    Vec(relTrackers.map(_.io.tl_addr_block === io.inner.acquire.bits.addr_block)).toBits
+
+  val tl_rel_conflict = tl_rel_active.orR || tl_rel_block.orR
+  val tl_acq_conflict = tl_acq_active.orR || tl_acq_block.orR
+
+  val inner_acq_arb = Module(new LockingRRArbiter(io.inner.acquire.bits, nAcquireTransactors, io.inner.acquire.bits.tlDataBeats, lock _))
+  inner_acq_arb.io.in.valid := io.inner.acquire.valid && !acq_rel_conflict && !tl_rel_conflict
+  inner_acq_arb.io.in.bits := io.inner.acquire.bits
+  io.inner.acquire.ready := inner_acq_arb.io.in.ready
+  inner_acq_arb.io.out := acqTrackers.map(_.inner.acquire)
+
+  val inner_rel_arb = Module(new LockingRRArbiter(io.inner.release.bits, nReleaseTransactors, io.inner.release.bits.tlDataBeats, lock _))
+  inner_rel_arb.io.in.valid := io.inner.release.valid && !tl_acq_conflict
+  inner_rel_arb.io.in.bits := io.inner.release.bits
+  io.inner.release.ready := inner_rel_arb.io.in.ready
+  inner_rel_arb.io.out := relTrackers.map(_.inner.release)
+
+  doOutputArbitration(io.inner.grant, memTrackers.map(_.inner.grant))
+  doInputRouting(io.inner.finish, memTrackers.map(_.inner.finish))
+
 
 }
 
