@@ -159,7 +159,7 @@ class TCMetadataArray(implicit p: Parameters) extends TCModule()(p) {
   val onReset = () => TCMetadata(UInt(0), UInt(0), TCMIIncoherence.onReset)
   val meta = Module(new MetadataArray[TCMetadata](onReset))
   meta.io.read <> io.read
-  meta.io.read.bits.way_en := (Vec.fill(nWays){Bool(true)}).toBits
+  meta.io.read.bits.way_en := Fill(nWays,UInt(1,1))
   meta.io.write <> io.write
 
   val s1_read_valid = Reg(next = ren)
@@ -363,7 +363,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.data.write.bits.idx := idx
   io.data.write.bits.way_en := way_en
   io.data.write.bits.data := Mux(state === s_D_BW, write_buf(data_cnt), xact.data)
-  io.data.write.bits.mask := Mux(state === s_D_BW, (Vec.fill(rowBits){Bool(true)}).toBits, xact.mask)
+  io.data.write.bits.mask := Mux(state === s_D_BW, Fill(rowBits,UInt(1,1)), xact.mask)
   io.data.write.valid := state === s_D_RW || state === s_D_BW
   write_buf := write_buf.fromBits(fetch_buf.toBits)
 
@@ -888,7 +888,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
   when(mt_state === ms_OACQ && !tc_wdata_valid) {
     tc_xact.mem_data := i_tag.toBits << (tc_tt_byte_index * UInt(8))
-    tc_xact.mem_mask := (Vec.fill(tgHelper.cacheBlockTagBytes){Bool(true)}).toBits << tc_tt_byte_index
+    tc_xact.mem_mask := Fill(tgHelper.cacheBlockTagBytes,UInt(1,1)) << tc_tt_byte_index
     tc_wdata_valid := Bool(true)
   }
 
@@ -930,12 +930,22 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ognt_done = connectIncomingDataBeatCounter(outer.grant)
 
   // inner acquire
+  when(mt_state === ms_IDLE) {
+    (0 until refillCycles).foreach( i => {
+      data(i) := UInt(0)
+      tag(i) := UInt(0)
+      tmask(i) := UInt(0)
+    })
+  }
+
   when(inner.acquire.fire()) {
     val iacq_data = tgHelper.removeTag(inner.acquire.bits.data)
     val iacq_tag = tgHelper.extractTag(inner.acquire.bits.data)
+    val iacq_tmask = tgHelper.extractTagMask(inner.acquire.bits.wmask())
     (0 until i_rows).foreach( i => {
       data(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_data(i*rowBits+rowBits-1,i*rowBits)
       tag(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_tag(i*rowTagBits+rowTagBits-1,i*rowTagBits)
+      tmask(iacq_cnt*UInt(i_rows) + UInt(i))
     })
   }
   inner.acquire.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
@@ -958,7 +968,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
         wmask = tgHelper.removeTagMask(xact.wmask()),
         alloc = Bool(true)
       ),
-      Cat(MT_Q, M_XRD, Bool(true)))) // coherent Acquire must be getBlock?
+      Cat(MT_Q, M_XRD, Bool(true))) // coherent Acquire must be getBlock?
+  )(p.alterPartial({ case TLId => outerTLId }))
 
   // outer grant
   outer.grant.ready := mt_state === ms_OGNT
@@ -970,7 +981,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 
   // inner grant
-  inner.grant.valid := mt_state === ms_IGNT
+  inner.grant.valid := mt_state === ms_IGNT && (!inner.grant.bits.hasData() || tc_tt_valid)
   val ignt_tag = Wire(UInt(width=rowTagBits))
   ignt_tag := tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
   val innerTagBits = UInt(tgHelper.sizeOfTag(innerDataBits))
@@ -988,6 +999,45 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
   // inner finish
   inner.finish.ready := mt_state === ms_IFIN
+
+  // tag
+  tc_req_valid := mt_state === ms_IDLE && inner.acquire.fire()
+
+  when(mt_state === ms_IDLE && inner.acquire.fire()) {
+    tc_wdata_valid := Bool(false)
+    tc_xact.rw := Bool(true)
+    tc_xact.addr := inner.acquire.bits.full_addr()
+  }
+
+  when(mt_state === ms_OACQ && !tc_wdata_valid) {
+    if(tgBits >= 8) {
+      // expand tag mask
+      tc_xact.mem_data := tag.toBits << (tc_tt_byte_index * UInt(8))
+      tc_xact.mem_mask := FillInterleaved(tgBits/8, tmask.toBits) << tc_tt_byte_index
+      tc_wdata_valid := Bool(true)
+    } else {
+      // combine tag mask into byte mask
+      // if wmask is not full, wait until tt_data is ready
+      when(tmask.toBits === Fill(refillCycles*rowTags, UInt(1,1))) {
+        tc_xact.mem_data := tag.toBits << (tc_tt_byte_index * UInt(8))
+        tc_xact.mem_mask := Fill(tgHelper.cacheBlockTagBytes,UInt(1,1)) << tc_tt_byte_index
+        tc_wdata_valid := Bool(true)
+      }.elsewhen(tc_tt_valid) {
+        val tag_write = tag.toBits & FillInterleaved(tgBits, tmask.toBits)
+        val tag_read = Wire(UInt(width=tgHelper.cacheBlockTagBits))
+        tag_read := tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
+        val tag_update = tag_write | (tag_read & ~FillInterleaved(tgBits, tmask.toBits))
+        tc_xact.mem_data := tag_update << (tc_tt_byte_index * UInt(8))
+        val tag_mask = tag.toBits
+        val tag_byte_mask =
+          Vec((0 until tgHelper.cacheBlockTagBytes).map( i => {
+            tag_mask(i*8/tgBits + 8/tagBits - 1, i*8/tgBits).orR
+          })).toBits
+        tc_xact.mem_mask := tag_byte_mask  << tc_tt_byte_index
+        tc_wdata_valid := Bool(true)
+      }
+    }
+  }
 
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
