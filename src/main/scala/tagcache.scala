@@ -1041,6 +1041,33 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 }
 
 
+class TCTagXactDemux(banks: Int)(implicit p: Parameters) extends TCModule()(p) {
+  val io = new Bundle {
+    val in = new TCTagXactIO().flip
+    val out = Vec(banks, new TCTagXactIO)
+  }
+
+  require(isPow2(banks)) // tagXactTracker is banked
+
+  val idx = io.in.req.bits.addr >> blockOffBits
+  val i_sel = Wire(Vec(banks,Bool()))
+  if(banks == 1) {
+    i_sel(0) := Bool(true)
+  } else {
+    val index = if(banks>2) idx(log2Up(banks)-1,0) else idx(0)
+    i_sel := i_sel.fromBits(UIntToOH(index,banks))
+  }
+  val o_sel = io.out.map(_.resp.valid)
+
+  io.out.zip(i_sel).foreach{ case(o, s) => {
+    o.req.valid := io.in.req.valid && s
+    o.req.bits := io.in.req.bits
+  }}
+
+  io.in.req.ready := Mux1H(i_sel, io.out.map(_.req.ready))
+  io.in.resp := Mux1H(o_sel, io.out.map(_.resp))
+}
+
 ////////////////////////////////////////////////////////////////
 // Top level of the Tag Cache
 
@@ -1058,6 +1085,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
     (nReleaseTransactors until nMemTransactors).map(id => Module(new TCMemAcquireTracker(id)))
   val memTrackers = relTrackers ++ acqTrackers
 
+  // banked tag trackers
   val tagTrackers = (nMemTransactors until nMemTransactors + nTagTransactors).map(id =>
     Module(new TCTagXactTracker(id)(tcTagTLParams)))
 
@@ -1099,5 +1127,45 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   doOutputArbitration(io.inner.grant, memTrackers.map(_.inner.grant))
   doInputRouting(io.inner.finish, memTrackers.map(_.inner.finish))
+
+  // helpers for internal connection
+  def doTcOutputArbitration[T <: TCBundle](out: DecoupledIO[T], ins: Seq[DecoupledIO[T]],
+                                           alloc: Seq[Bool])
+  {
+    val arb = Module(new RRArbiter(out.bits, ins.size))
+    out <> arb.io.out
+    arb.io.in.zip(ins).zip(alloc).foreach{ case((arb, in), a) => {
+      arb.valid := in.valid && a
+      arb.bits := in.bits
+      in.ready := arb.ready && a
+    }}
+  }
+
+  def doTcInputRouting[T <: TCBundle](in: ValidIO[T], outs: Seq[ValidIO[T]],
+                                      i_id: UInt, o_ids: Seq[UInt])
+  {
+    outs.zip(o_ids).foreach{ case(out, id) => {
+      out.bits := in.bits
+      out.valid := in.valid && id === i_id
+    }}
+  }
+
+  // connect transactions from memTrackers to TagTrackers
+  val tagXactDemuxers = memTrackers.map(_ => Module(new TCTagXactDemux(nTagTransactors)))
+  memTrackers.zip(tagXactDemuxers).foreach{ case(t, m) => t.io.tc <> m.io.in}
+
+  tagTrackers.zipWithIndex.foreach{ case(t, i) => {
+    doTcOutputArbitration(
+      out = t.io.xact.req,
+      ins = tagXactDemuxers.map(_.io.out(i).req),
+      alloc = (0 until nTagTransactors).map(_ => Bool(true)) // use for deadlock avoidance
+    )
+    doTcInputRouting(
+      in = t.io.xact.resp,
+      outs = tagXactDemuxers.map(_.io.out(i).resp),
+      i_id = t.io.xact.resp.bits.id,
+      o_ids = (0 until nMemTransactors).map( i => UInt(i))
+    )
+  }}
 
 }
