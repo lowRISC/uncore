@@ -40,8 +40,9 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 abstract class TCModule(implicit val p: Parameters) extends Module with HasTCParameters
 abstract class TCBundle(implicit val p: Parameters) extends ParameterizedBundle()(p) with HasTCParameters
 
-trait HasTCMemXactId extends HasTCParameters { val id = UInt(width = log2Up(nMemTransactors)) }
-trait HasTCTagXactId extends HasTCParameters { val id = UInt(width = log2Up(nTagTransactors)) }
+trait HasTCId extends HasTCParameters {
+  val id = UInt(width = log2Up(nMemTransactors + nTagTransactors + 1))
+}
 trait HasTCTagFlag   extends HasTCParameters { val tagFlag = UInt(width = 1) }
 trait HasTCTag       extends HasTCParameters { val tag = UInt(width = tagBits) }
 trait HasTCHit       extends HasTCParameters { val hit = Bool() }
@@ -82,9 +83,9 @@ object TCMetadata {
   }
 }
 
-class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTag with HasTCTagXactId
+class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTag with HasTCId
 class TCMetaWriteReq(implicit p: Parameters) extends MetaWriteReq[TCMetadata](new TCMetadata)(p)
-class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCHit {
+class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCHit {
   val meta = new TCMetadata
   val way_en = UInt(width = nWays)
 }
@@ -102,13 +103,13 @@ trait HasTCByteMask extends HasTCParameters { val mask = UInt(width = rowBytes) 
 trait HasTCBitMask extends HasTCParameters { val mask = UInt(width = rowBits) }
 trait HasTCAddr extends HasTCParameters { val addr = UInt(width=p(PAddrBits)) }
 
-class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId with HasTCRow {
+class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCRow {
   val idx = Bits(width = idxBits)
   val way_en = Bits(width = nWays)
 }
 class TCDataWriteReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCData with HasTCByteMask
 class TCDataReadResp(implicit p: Parameters) extends TCBundle()(p)
-    with HasTCTagXactId with HasTCData
+    with HasTCId with HasTCData
 
 class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   val read = Decoupled(new TCDataReadReq)
@@ -118,7 +119,7 @@ class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
 }
 
 class TCWBReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCTag
-class TCWBResp(implicit p: Parameters) extends TCBundle()(p) with HasTCTagXactId
+class TCWBResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId
 
 class TCWBIO(implicit p: Parameters) extends TCBundle()(p) {
   val req = Decoupled(new TCWBReq)
@@ -136,12 +137,12 @@ object TCTagOp {
 }
 
 class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
-    with HasTCMemXactId with HasTCData with HasTCBitMask with HasTCAddr
+    with HasTCId with HasTCData with HasTCBitMask with HasTCAddr
 {
   val op   = UInt(width=TCTagOp.nBits)
 }
 
-class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCMemXactId
+class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId
     with HasTCHit with HasTCData with HasTCTagFlag
 
 class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
@@ -1129,24 +1130,23 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   doInputRouting(io.inner.finish, memTrackers.map(_.inner.finish))
 
   // helpers for internal connection
-  def doTcOutputArbitration[T <: TCBundle](out: DecoupledIO[T], ins: Seq[DecoupledIO[T]],
-                                           alloc: Seq[Bool])
+  def doTcOutputArbitration[T <: Bundle](out: DecoupledIO[T], ins: Seq[DecoupledIO[T]],
+                                           alloc: Option[Seq[Bool]] = None)
   {
     val arb = Module(new RRArbiter(out.bits, ins.size))
     out <> arb.io.out
-    arb.io.in.zip(ins).zip(alloc).foreach{ case((arb, in), a) => {
+    val alloc_m = alloc.getOrElse(Vec(ins.size, Bool(true)).toSeq)
+    arb.io.in.zip(ins).zip(alloc_m).foreach{ case((arb, in), a) => {
       arb.valid := in.valid && a
       arb.bits := in.bits
       in.ready := arb.ready && a
     }}
   }
 
-  def doTcInputRouting[T <: TCBundle](in: ValidIO[T], outs: Seq[ValidIO[T]],
-                                      i_id: UInt, o_ids: Seq[UInt])
-  {
-    outs.zip(o_ids).foreach{ case(out, id) => {
+  def doTcInputRouting[T <: Bundle with HasTCId](in: ValidIO[T], outs: Seq[ValidIO[T]], base:Int = 0) {
+    outs.zipWithIndex.foreach{ case(out, i) => {
       out.bits := in.bits
-      out.valid := in.valid && id === i_id
+      out.valid := in.valid && in.bits.id === UInt(base+i)
     }}
   }
 
@@ -1155,17 +1155,22 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   memTrackers.zip(tagXactDemuxers).foreach{ case(t, m) => t.io.tc <> m.io.in}
 
   tagTrackers.zipWithIndex.foreach{ case(t, i) => {
-    doTcOutputArbitration(
-      out = t.io.xact.req,
-      ins = tagXactDemuxers.map(_.io.out(i).req),
-      alloc = (0 until nTagTransactors).map(_ => Bool(true)) // use for deadlock avoidance
-    )
-    doTcInputRouting(
-      in = t.io.xact.resp,
-      outs = tagXactDemuxers.map(_.io.out(i).resp),
-      i_id = t.io.xact.resp.bits.id,
-      o_ids = (0 until nMemTransactors).map( i => UInt(i))
-    )
+    doTcOutputArbitration(t.io.xact.req, tagXactDemuxers.map(_.io.out(i).req))
+    doTcInputRouting(t.io.xact.resp, tagXactDemuxers.map(_.io.out(i).resp))
   }}
+
+  // connect tagXactTrackers to meta array
+  doTcOutputArbitration(meta.io.read, tagTrackers.map(_.io.meta.read))
+  doTcOutputArbitration(meta.io.write, tagTrackers.map(_.io.meta.write))
+  doTcInputRouting(meta.io.resp, tagTrackers.map(_.io.meta.resp), nMemTransactors)
+
+  // connect tagXactTrackers and writeback unit to data array
+  doTcOutputArbitration(data.io.read, tagTrackers.map(_.io.data.read) :+ wb.io.data.read)
+  doTcOutputArbitration(data.io.write, tagTrackers.map(_.io.data.write) :+ wb.io.data.write)
+  doTcInputRouting(data.io.resp, tagTrackers.map(_.io.data.resp) :+ wb.io.data.resp, nMemTransactors)
+
+  // connect tagXactTrackers to writeback unit
+  doTcOutputArbitration(wb.io.xact.req, tagTrackers.map(_.io.wb.req))
+  doTcInputRouting(wb.io.xact.resp, tagTrackers.map(_.io.wb.resp), nMemTransactors)
 
 }
