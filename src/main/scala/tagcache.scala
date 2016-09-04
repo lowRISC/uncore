@@ -306,7 +306,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val state = Reg(init = s_IDLE)
 
   // internal signals
-  val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
+  val xact_queue = Queue(io.xact.req, nMemTransactors, true) // enforce temporal order
+  val xact = RegEnable(xact_queue.bits, xact_queue.fire())
   val xact_resp_done = Reg(init=Bool(false)) // simplify early ack check (no double ack)
   val idx = xact.addr(idxBits+blockOffBits-1, blockOffBits)
   val way_en = Reg(io.meta.resp.bits.way_en, state === s_M_R_RESP && io.meta.resp.valid)
@@ -327,7 +328,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
                                 io.data.read.fire(), refillCycles)
 
   // transaction request
-  io.xact.req.ready := state === s_IDLE
+  xact_queue.ready := state === s_IDLE
 
   // transaction response
   io.xact.resp.bits.id := xact.id
@@ -1130,17 +1131,11 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   doInputRouting(io.inner.finish, memTrackers.map(_.inner.finish))
 
   // helpers for internal connection
-  def doTcOutputArbitration[T <: Bundle](out: DecoupledIO[T], ins: Seq[DecoupledIO[T]],
-                                           alloc: Option[Seq[Bool]] = None)
+  def doTcOutputArbitration[T <: Bundle](out: DecoupledIO[T], ins: Seq[DecoupledIO[T]])
   {
     val arb = Module(new RRArbiter(out.bits, ins.size))
     out <> arb.io.out
-    val alloc_m = alloc.getOrElse(Vec(ins.size, Bool(true)).toSeq)
-    arb.io.in.zip(ins).zip(alloc_m).foreach{ case((arb, in), a) => {
-      arb.valid := in.valid && a
-      arb.bits := in.bits
-      in.ready := arb.ready && a
-    }}
+    arb.io.in <> ins
   }
 
   def doTcInputRouting[T <: Bundle with HasTCId](in: ValidIO[T], outs: Seq[ValidIO[T]], base:Int = 0) {
