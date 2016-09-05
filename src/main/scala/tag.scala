@@ -83,7 +83,7 @@ class TagUtil(
     require(data.getWidth >= wordBits && data.getWidth % wordBits == 0)
     require(tag.getWidth == tagBits)
     val words = data.getWidth / wordBits
-    insertTag(data, Fill(words,tag))
+    insertTags(data, Fill(words,tag))
   }
 
   // insert corresponding write mask for tags
@@ -126,10 +126,6 @@ class TagUtil(
   def sizeWithTag(s: Int): Int = {
     require(s >= wordBits && s % wordBits == 0)
     s / wordBits * tagWordBits
-  }
-
-  def sizeWithTag(s: UInt): UInt = {
-    s / UInt(wordBits) * UInt(tagWordBits)
   }
 
   // calculate the size without tags
