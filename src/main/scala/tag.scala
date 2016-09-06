@@ -45,6 +45,7 @@ class TagUtil(
   def map1Base  = memBase + memSize - map1Size          // base address of tag map 1
   def cacheBlockTagBits = cacheBlockBytes / wordBytes * normTagBits // tag size of a cache block
   def cacheBlockTagBytes = cacheBlockTagBits / 8
+  def blockOffBits = log2Up(cacheBlockBytes)
 
   require(isPow2(mapRatio))
   require(mapRatio >= tagRatio)                         // no extra space for map
@@ -165,4 +166,7 @@ class TagUtil(
   def pa2tm1a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
   def pa2tm1r(addr: UInt, rob: Int): UInt = addr(unTagBits + unMapBits + unMapBits + rob -1, unTagBits + unMapBits + unMapBits)
   def pa2tm1b(addr: UInt): UInt = addr(unTagBits + unMapBits + unMapBits - 1, unTagBits + unMapBits + unMapBits - 3)
+
+  // check whether this is top-map line
+  def is_top(addr: UInt): Bool = (addr >> blockOffBits) >= UInt(map1Base >> blockOffBits)
 }
