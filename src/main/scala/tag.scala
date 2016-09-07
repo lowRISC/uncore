@@ -46,6 +46,8 @@ class TagUtil(
   def cacheBlockTagBits = cacheBlockBytes / wordBytes * normTagBits // tag size of a cache block
   def cacheBlockTagBytes = cacheBlockTagBits / 8
   def blockOffBits = log2Up(cacheBlockBytes)
+  def topSize = map1Size                                // size of the top map
+  def topBase = map1Base                                // base address of the top map
 
   require(isPow2(mapRatio))
   require(mapRatio >= tagRatio)                         // no extra space for map

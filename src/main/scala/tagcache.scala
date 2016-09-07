@@ -1075,6 +1075,42 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 }
 
+// initialize the top map after power up
+class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
+  val io = new Bundle {
+    val mem_xact = new TCTagXactIO().flip // tag transaction from memTrackers
+    val tag_xact = new TCTagXactIO        // tag transaction to tagTrackers
+  }
+
+  require(isPow2(nTagTransactors))
+  val xBlockSize = p(CacheBlockBytes) * nTagTransactors
+  val nBlocks = tgHelper.topSize / xBlockSize
+
+  val rst_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
+  val init_done = Reg(init=Bool(false))
+  when(rst_cnt =/= UInt(nBlocks) && io.tag_xact.req.fire()) { rst_cnt := rst_cnt + UInt(1) }
+  when(rst_cnt === UInt(nBlocks) && io.tag_xact.resp.valid) { init_done := Bool(true) }
+
+  // normal operation
+  io.tag_xact.req.valid  := io.mem_xact.req.valid
+  io.tag_xact.req.bits   := io.mem_xact.req.bits
+  io.mem_xact.req.ready  := io.tag_xact.req.ready
+  io.mem_xact.resp.valid := io.tag_xact.resp.valid
+  io.mem_xact.resp.bits  := io.tag_xact.resp.bits
+
+  when(!init_done) {
+    // during initialization
+    io.tag_xact.req.valid  := rst_cnt =/= UInt(nBlocks)
+      io.tag_xact.req.bits.data := UInt(0)
+      io.tag_xact.req.bits.mask := UInt(0)
+      io.tag_xact.req.bits.addr :=
+        UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_cnt * UInt(xBlockSize)
+      io.tag_xact.req.bits.op   := TCTagOp.Create
+    io.mem_xact.req.ready  := Bool(false)
+    io.mem_xact.resp.valid := Bool(false)
+  }
+
+}
 
 class TCTagXactDemux(banks: Int)(implicit p: Parameters) extends TCModule()(p) {
   val io = new Bundle {
@@ -1121,6 +1157,9 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   val memTrackers = relTrackers ++ acqTrackers
 
   // banked tag trackers
+  val tagTrackerInitiators = (0 until nTagTransactors).map( id =>
+    Module(new TCInitiator(id)))
+
   val tagTrackers = (nMemTransactors until nMemTransactors + nTagTransactors).map(id =>
     Module(new TCTagXactTracker(id)))
 
@@ -1182,9 +1221,10 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   val tagXactDemuxers = memTrackers.map(_ => Module(new TCTagXactDemux(nTagTransactors)))
   memTrackers.zip(tagXactDemuxers).foreach{ case(t, m) => t.io.tc <> m.io.in}
 
-  tagTrackers.zipWithIndex.foreach{ case(t, i) => {
-    doTcOutputArbitration(t.io.xact.req, tagXactDemuxers.map(_.io.out(i).req))
-    doTcInputRouting(t.io.xact.resp, tagXactDemuxers.map(_.io.out(i).resp))
+  tagTrackers.zip(tagTrackerInitiators).zipWithIndex.foreach{ case((t, ti), i) => {
+    t.io.xact <> ti.io.tag_xact
+    doTcOutputArbitration(ti.io.mem_xact.req, tagXactDemuxers.map(_.io.out(i).req))
+    doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp))
   }}
 
   // connect tagXactTrackers to meta array
