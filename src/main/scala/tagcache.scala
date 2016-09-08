@@ -26,6 +26,8 @@ trait HasTCParameters extends HasCoherenceAgentParameters
   val rowTags = rowBits / tgHelper.wordBits
   val rowTagBits = tgBits * rowTags
 
+  val uncached = true
+
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.withTag && innerTLParams.withTag)
   require(outerTLId == p(TLId))
@@ -458,7 +460,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   // state machine
-  when(state === s_IDLE) {
+  when(state === s_IDLE && xact_queue.fire()) {
     if(earlyAck) xact_resp_done := Bool(false)
     state := s_M_R_REQ
   }
@@ -930,7 +932,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.release.fire()) {
     xact := inner.release.bits
-    mt_state := Mux(irel_done, ms_IREL, ms_OACQ)
+    mt_state := Mux(irel_done, ms_OACQ, ms_IREL)
   }
   when(mt_state === ms_IREL && irel_done) {
     mt_state := ms_OACQ
@@ -1056,7 +1058,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // ------------ memory tracker state machine ---------------- //
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
     xact := inner.acquire.bits
-    mt_state := Mux(iacq_done, ms_IACQ, ms_OACQ)
+    mt_state := Mux(iacq_done, ms_OACQ, ms_IACQ)
   }
   when(mt_state === ms_IACQ && iacq_done) {
     mt_state := ms_OACQ
@@ -1068,7 +1070,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     mt_state := ms_IGNT
   }
   when(mt_state === ms_IGNT && ignt_done) {
-    mt_state := Mux(inner.grant.bits.requiresAck(), ms_IFIN, ms_IDLE)
+    if(uncached) mt_state := ms_IDLE
+    else mt_state := Mux(inner.grant.bits.requiresAck(), ms_IFIN, ms_IDLE)
   }
   when(mt_state === ms_IFIN && inner.finish.valid) {
     mt_state := ms_IDLE
@@ -1086,10 +1089,10 @@ class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
   val xBlockSize = p(CacheBlockBytes) * nTagTransactors
   val nBlocks = tgHelper.topSize / xBlockSize
 
-  val rst_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
-  val init_done = Reg(init=Bool(false))
-  when(rst_cnt =/= UInt(nBlocks) && io.tag_xact.req.fire()) { rst_cnt := rst_cnt + UInt(1) }
-  when(rst_cnt === UInt(nBlocks) && io.tag_xact.resp.valid) { init_done := Bool(true) }
+  val rst_req_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
+  val rst_ack_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
+  when(rst_req_cnt =/= UInt(nBlocks) && io.tag_xact.req.fire()) { rst_req_cnt := rst_req_cnt + UInt(1) }
+  when(rst_ack_cnt =/= UInt(nBlocks) && io.tag_xact.resp.valid) { rst_ack_cnt := rst_ack_cnt + UInt(1) }
 
   // normal operation
   io.tag_xact.req.valid  := io.mem_xact.req.valid
@@ -1098,13 +1101,13 @@ class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
   io.mem_xact.resp.valid := io.tag_xact.resp.valid
   io.mem_xact.resp.bits  := io.tag_xact.resp.bits
 
-  when(!init_done) {
+  when(rst_ack_cnt =/= UInt(nBlocks)) {
     // during initialization
-    io.tag_xact.req.valid  := rst_cnt =/= UInt(nBlocks)
+    io.tag_xact.req.valid  := rst_req_cnt =/= UInt(nBlocks)
       io.tag_xact.req.bits.data := UInt(0)
       io.tag_xact.req.bits.mask := UInt(0)
       io.tag_xact.req.bits.addr :=
-        UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_cnt * UInt(xBlockSize)
+        UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_req_cnt * UInt(xBlockSize)
       io.tag_xact.req.bits.op   := TCTagOp.Create
     io.mem_xact.req.ready  := Bool(false)
     io.mem_xact.resp.valid := Bool(false)
@@ -1154,7 +1157,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
     (0               until nReleaseTransactors).map(id => Module(new TCMemReleaseTracker(id)))
   val acqTrackers =
     (nReleaseTransactors until nMemTransactors).map(id => Module(new TCMemAcquireTracker(id)))
-  val memTrackers = relTrackers ++ acqTrackers
+  val memTrackers = if(uncached) acqTrackers else relTrackers ++ acqTrackers
 
   // banked tag trackers
   val tagTrackerInitiators = (0 until nTagTransactors).map( id =>
@@ -1172,10 +1175,12 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   io.outer <> outer_arb.io.out
 
   // connect TileLink inputs
-  val acq_rel_conflict =  // when acq and rel for the same block, rel first
+  val acq_rel_conflict =  if(uncached) Bool(false) else {
+    // when acq and rel for the same block, rel first
     io.inner.acquire.valid &&
     io.inner.release.valid &&
     io.inner.acquire.bits.addr_block === io.inner.release.bits.addr_block
+  }
 
   val tl_acq_block = Vec(memTrackers.map(t=>{t.io.tl_block && t.io.tl_addr_block === io.inner.acquire.bits.addr_block})).toBits.orR
   val tl_acq_match = Vec(acqTrackers.map(t=>{t.io.tl_block && t.inner.acquire.ready && t.io.tl_addr_block === io.inner.acquire.bits.addr_block})).toBits
@@ -1188,16 +1193,18 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   }}
   io.inner.acquire.ready := tl_acq_alloc.orR
 
-  val tl_rel_block = Vec(memTrackers.map(t=>{t.io.tl_block && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits.orR
-  val tl_rel_match = Vec(relTrackers.map(t=>{t.io.tl_block && t.inner.release.ready && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits
-  val tl_rel_alloc = Mux(tl_rel_match.orR, tl_rel_match, Mux(tl_rel_block, UInt(0,nReleaseTransactors),
-    PriorityEncoderOH(Vec(relTrackers.map(_.inner.release.ready)).toBits)))
+  if(!uncached) {
+    val tl_rel_block = Vec(memTrackers.map(t=>{t.io.tl_block && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits.orR
+    val tl_rel_match = Vec(relTrackers.map(t=>{t.io.tl_block && t.inner.release.ready && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits
+    val tl_rel_alloc = Mux(tl_rel_match.orR, tl_rel_match, Mux(tl_rel_block, UInt(0,nReleaseTransactors),
+      PriorityEncoderOH(Vec(relTrackers.map(_.inner.release.ready)).toBits)))
 
-  relTrackers.zipWithIndex.foreach{ case(t,i) => {
-    t.inner.release.valid := io.inner.release.valid && tl_rel_alloc(i)
-    t.inner.release.bits := io.inner.release.bits
-  }}
-  io.inner.release.ready := tl_rel_alloc.orR
+    relTrackers.zipWithIndex.foreach{ case(t,i) => {
+      t.inner.release.valid := io.inner.release.valid && tl_rel_alloc(i)
+      t.inner.release.bits := io.inner.release.bits
+    }}
+    io.inner.release.ready := tl_rel_alloc.orR
+  }
 
   doOutputArbitration(io.inner.grant, memTrackers.map(_.inner.grant))
   doInputRouting(io.inner.finish, memTrackers.map(_.inner.finish))
@@ -1224,7 +1231,8 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   tagTrackers.zip(tagTrackerInitiators).zipWithIndex.foreach{ case((t, ti), i) => {
     t.io.xact <> ti.io.tag_xact
     doTcOutputArbitration(ti.io.mem_xact.req, tagXactDemuxers.map(_.io.out(i).req))
-    doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp))
+    if(uncached) doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp), 1)
+    else         doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp), 0)
   }}
 
   // connect tagXactTrackers to meta array
