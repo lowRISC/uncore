@@ -12,8 +12,10 @@ case object TCEarlyAck extends Field[Boolean]
 trait HasTCParameters extends HasCoherenceAgentParameters
     with HasCacheParameters with HasTagParameters
 {
+  val uncached = true
+
   val nMemAcquireTransactors = p(TCMemTransactors)
-  val nMemReleaseTransactors = 1
+  val nMemReleaseTransactors = if(uncached) 0 else 1
   val nMemTransactors = nMemReleaseTransactors + nMemAcquireTransactors
   val nTagTransactors = p(TCTagTransactors)
 
@@ -25,8 +27,6 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 
   val rowTags = rowBits / tgHelper.wordBits
   val rowTagBits = tgBits * rowTags
-
-  val uncached = true
 
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.withTag && innerTLParams.withTag)
@@ -1154,10 +1154,13 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   val data      = Module(new TCDataArray)
 
   val relTrackers =
-    (0               until nReleaseTransactors).map(id => Module(new TCMemReleaseTracker(id)))
+    (0                      until nMemReleaseTransactors).map(id => Module(new TCMemReleaseTracker(id)))
   val acqTrackers =
-    (nReleaseTransactors until nMemTransactors).map(id => Module(new TCMemAcquireTracker(id)))
-  val memTrackers = if(uncached) acqTrackers else relTrackers ++ acqTrackers
+    (nMemReleaseTransactors until nMemAcquireTransactors).map(id => Module(new TCMemAcquireTracker(id)))
+  val memTrackers = relTrackers ++ acqTrackers
+
+  val acq_size = acqTrackers.size
+  println(s"nMemReleaseTransactors=$nMemReleaseTransactors nMemTransactors=$nMemTransactors size=$acq_size")
 
   // banked tag trackers
   val tagTrackerInitiators = (0 until nTagTransactors).map( id =>
@@ -1184,7 +1187,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   val tl_acq_block = Vec(memTrackers.map(t=>{t.io.tl_block && t.io.tl_addr_block === io.inner.acquire.bits.addr_block})).toBits.orR
   val tl_acq_match = Vec(acqTrackers.map(t=>{t.io.tl_block && t.inner.acquire.ready && t.io.tl_addr_block === io.inner.acquire.bits.addr_block})).toBits
-  val tl_acq_alloc = Mux(tl_acq_match.orR, tl_acq_match, Mux(tl_acq_block, UInt(0,nAcquireTransactors),
+  val tl_acq_alloc = Mux(tl_acq_match.orR, tl_acq_match, Mux(tl_acq_block, UInt(0,nMemAcquireTransactors),
     PriorityEncoderOH(Vec(acqTrackers.map(_.inner.acquire.ready)).toBits)))
 
   acqTrackers.zipWithIndex.foreach{ case(t,i) => {
@@ -1196,7 +1199,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   if(!uncached) {
     val tl_rel_block = Vec(memTrackers.map(t=>{t.io.tl_block && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits.orR
     val tl_rel_match = Vec(relTrackers.map(t=>{t.io.tl_block && t.inner.release.ready && t.io.tl_addr_block === io.inner.release.bits.addr_block})).toBits
-    val tl_rel_alloc = Mux(tl_rel_match.orR, tl_rel_match, Mux(tl_rel_block, UInt(0,nReleaseTransactors),
+    val tl_rel_alloc = Mux(tl_rel_match.orR, tl_rel_match, Mux(tl_rel_block, UInt(0,nMemReleaseTransactors),
       PriorityEncoderOH(Vec(relTrackers.map(_.inner.release.ready)).toBits)))
 
     relTrackers.zipWithIndex.foreach{ case(t,i) => {
@@ -1231,8 +1234,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   tagTrackers.zip(tagTrackerInitiators).zipWithIndex.foreach{ case((t, ti), i) => {
     t.io.xact <> ti.io.tag_xact
     doTcOutputArbitration(ti.io.mem_xact.req, tagXactDemuxers.map(_.io.out(i).req))
-    if(uncached) doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp), 1)
-    else         doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp), 0)
+    doTcInputRouting(ti.io.mem_xact.resp, tagXactDemuxers.map(_.io.out(i).resp))
   }}
 
   // connect tagXactTrackers to meta array
