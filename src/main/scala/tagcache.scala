@@ -432,7 +432,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
         fetch_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
       })
       meta_tag := addrTag
-      meta_state := Mux(write_tag, TCMetadata.Dirty, TCMetadata.Clean)
+      meta_state := TCMetadata.Dirty // create always ends up in dirty
       meta_tagFlag := write_tag
       fetch_sent := Bool(true)
       fetch_done := Bool(true)
