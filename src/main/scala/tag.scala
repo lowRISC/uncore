@@ -37,7 +37,8 @@ class TagUtil(
   def tagRatio = wordBits / normTagBits                 // tag compression ratio
   def unTagBits = log2Up(tagRatio)                      // offset bits to get tag address
   def unMapBits = log2Up(mapRatio)                      // offset bits to get map address
-  def tableSize = memSize / tagRatio                     // size of the tag table
+  def paddrMask = memSize - 1                           // mask memory base when convert physical addresses
+  def tableSize = memSize / tagRatio                    // size of the tag table
   def tableBase = memBase + memSize - tableSize         // base address of the tag table
   def map0Size  = tableSize / mapRatio                  // size of tag map 0
   def map0Base  = memBase + memSize - map0Size          // base address of tag map 0
@@ -49,6 +50,7 @@ class TagUtil(
   def topSize = map1Size                                // size of the top map
   def topBase = map1Base                                // base address of the top map
 
+  require(isPow2(memSize))
   require(isPow2(mapRatio))
   require(mapRatio >= tagRatio)                         // no extra space for map
 
@@ -156,15 +158,15 @@ class TagUtil(
   }
 
   // convert physical address to tag table address / row byte index
-  def pa2tta(addr: UInt): UInt = (addr >> unTagBits) + UInt(tableBase)
+  def pa2tta(addr: UInt): UInt = ((addr & UInt(paddrMask)) >> unTagBits) + UInt(tableBase)
   def pa2ttr(addr: UInt, rbo: Int): UInt = addr(unTagBits + rbo - 1, unTagBits)
 
   // convert physical address to tag map 0 address(a) / bit offset(b)
-  def pa2tm0a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits)) + UInt(map0Base)
+  def pa2tm0a(addr: UInt): UInt = ((addr & UInt(paddrMask)) >> (unTagBits + unMapBits)) + UInt(map0Base)
   def pa2tm0b(addr: UInt, rbo: Int): UInt = addr(unTagBits + unMapBits + rbo - 1, unTagBits + unMapBits - 3)
 
   // convert physical address to tag map 1 address(a) / bit offset(b)
-  def pa2tm1a(addr: UInt): UInt = (addr >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
+  def pa2tm1a(addr: UInt): UInt = ((addr & UInt(paddrMask)) >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
   def pa2tm1b(addr: UInt, rbo: Int): UInt = addr(unTagBits + unMapBits + unMapBits + rbo - 1, unTagBits + unMapBits + unMapBits - 3)
 
   // check whether this is top-map line
