@@ -330,7 +330,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val fetch_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
   val (fetch_cnt, fetch_cnt_done) = Counter(state === s_D_FWB_RESP && io.tl.grant.fire(), outerDataBeats)
   val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
-                                io.data.read.fire(), refillCycles)
+                                io.data.resp.valid, refillCycles)
 
   // transaction request
   xact_queue.ready := state === s_IDLE
@@ -360,7 +360,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.data.read.bits.row := row
   io.data.read.bits.idx := idx
   io.data.read.bits.way_en := way_en
-  io.data.read.valid := state === s_D_R_REQ
+  io.data.read.valid := state === s_D_R_REQ || state === s_D_C_REQ
 
   // data read response
 
@@ -413,7 +413,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.tl.grant.ready := state === s_D_FWB_RESP && !fetch_done
 
   // meta check
-  when((state === s_D_C_REQ || state === s_D_C_RESP) && io.data.read.fire()) {
+  when((state === s_D_C_REQ || state === s_D_C_RESP) && io.data.resp.valid) {
     meta_tagFlag := meta_tagFlag || io.data.resp.bits.data =/= UInt(0)
   }
 
@@ -555,7 +555,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state := s_D_C_RESP
   }
   when(state === s_D_C_RESP && check_done) {
-    // really t:1->0
     io.xact.resp.bits.tagUpdate := Bool(true)
     io.xact.resp.valid := Bool(true)
     state := s_M_W
@@ -610,8 +609,8 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   // TM1.W              write to tag map 1
 
   val ts_IDLE :: ts_TT_R :: ts_TM0_R :: ts_TM1_FR :: ts_TM0_FR :: ts_TT_FR :: ts_TM0_C :: ts_TT_C :: ts_TT_W :: ts_TM0_W :: ts_TM1_W :: Nil = Enum(UInt(), 11)
+  val tc_state_next = Wire(init = ts_IDLE)
   val tc_state = Reg(init = ts_IDLE)
-  val tc_state_next = tc_state
   tc_state := tc_state_next
   val tc_xact = Reg(new TCXact)                 // record of tag cache search procedure
   val tc_req_valid = Wire(Bool())               // start the tag cache search transaction
@@ -764,6 +763,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   }
 
   // -------------- the shared state machine ----------------- //
+  tc_state_next := tc_state
   when(tc_state === ts_IDLE && tc_req_valid) {
     tc_tt_valid := Bool(false)
     when(Bool(true)) {          // most tagged

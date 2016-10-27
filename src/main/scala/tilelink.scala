@@ -62,7 +62,7 @@ trait HasTileLinkParameters extends HasTagParameters{
   val tlDataBeats = tlExternal.dataBeats
   val tlDataBits = if(tlTagged) tgHelper.sizeWithTag(tlExternal.dataBitsPerBeat)
                    else         tlExternal.dataBitsPerBeat
-  val tlDataBytes = tlExternal.dataBitsPerBeat/8             // ATTN: bytes of data without tag 
+  val tlDataBytes = tlExternal.dataBitsPerBeat/8             // ATTN: bytes of data without tag
   val tlWriteMaskBits = if(tlTagged) tgHelper.maskSizeWithTag(tlExternal.writeMaskBits)
                         else         tlExternal.writeMaskBits
   val tlBeatAddrBits = log2Up(tlDataBeats)
