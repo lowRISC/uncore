@@ -466,6 +466,24 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }
   }
 
+  when(io.xact.resp.valid) {
+    when(xact.op === TCTagOp.Read && io.xact.resp.bits.hit) {
+      printf("TagXact: (%d) Read 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
+    }
+    when(xact.op === TCTagOp.Read && !io.xact.resp.bits.hit) {
+      printf("TagXact: (%d) Read 0x%x miss\n", io.xact.resp.bits.id, xact.addr)
+    }
+    when(xact.op === TCTagOp.FetchRead) {
+      printf("TagXact: (%d) FetchRead 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
+    }
+    when(xact.op === TCTagOp.Write) {
+      printf("TagXact: (%d) Write 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+    }
+    when(xact.op === TCTagOp.Create) {
+      printf("TagXact: (%d) Create 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+    }
+  }
+
   // state machine
   when(state === s_IDLE && xact_queue.fire()) {
     state := s_M_R_REQ
@@ -1024,7 +1042,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
   when(mt_state === ms_IDLE && inner.acquire.fire()) {
     tc_wdata_valid := Bool(false)
-    tc_xact.rw := Bool(true)
+    tc_xact.rw := inner.acquire.bits.hasData()
     tc_xact.addr := inner.acquire.bits.full_addr()
   }
 
