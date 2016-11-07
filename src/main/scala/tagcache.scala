@@ -212,7 +212,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   // read           read non-empty line from data array
   // write          write line to memory
 
-  val s_IDLE :: s_CHECK :: s_READ :: s_READ_DONE :: s_WRITE :: Nil = Enum(UInt(), 5)
+  val s_IDLE :: s_CHECK :: s_READ :: s_READ_DONE :: s_WRITE :: s_GNT :: Nil = Enum(UInt(), 6)
   val state = Reg(init = s_IDLE)
 
   val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
@@ -242,6 +242,8 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   io.data.read.bits.id := UInt(id)
   io.data.read.bits.row := read_cnt
 
+  io.data.write.valid := Bool(false)
+
   when(state === s_CHECK) {
     data_buffer := Vec.fill(refillCycles)(UInt(0, rowBits))
   }
@@ -258,6 +260,8 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
       tlGetBeatAddr(tl_addr),
       tl_buffer(tl_cnt)
     )
+
+  io.tl.grant.ready := state === s_GNT
 
   when(state === s_IDLE && io.xact.req.valid) {
     state := Mux(io.xact.req.bits.empty, s_CHECK, s_READ)
@@ -277,6 +281,9 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     state := s_WRITE
   }
   when(state === s_WRITE && tl_done) {
+    state := s_GNT
+  }
+  when(state === s_GNT && io.tl.grant.valid) {
     state := s_IDLE
   }
 
