@@ -61,7 +61,7 @@ class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool, maxSize: Int, tagBit
       res = Cat(Mux(t.size === UInt(i) || doZero, Fill(8*maxSize-pos, signed && zeroed(pos-1)), res(8*maxSize-1,pos)), zeroed)
     }
     if(tagBits == 0) res(8*maxSize-1,0)
-    else Mux(typ === constants.MemoryOpConstants.MT_T, UInt(res >> 8*maxSize, 8*maxSize), res(8*maxSize-1,0))
+    else Mux(typ === constants.MemoryOpConstants.MT_T, UInt(dat >> 8*maxSize, 8*maxSize), res(8*maxSize-1,0))
   }
 
   def wordData = genData(2)
@@ -75,9 +75,9 @@ class AMOALU(rhsIsAligned: Boolean = false, tagBits:Int = 0)(implicit p: Paramet
     val addr = Bits(INPUT, blockOffBits)
     val cmd = Bits(INPUT, M_SZ)
     val typ = Bits(INPUT, MT_SZ)
-    val lhs = Bits(INPUT, operandBits)
-    val rhs = Bits(INPUT, operandBits)
-    val out = Bits(OUTPUT, operandBits)
+    val lhs = Bits(INPUT, operandBits+tagBits)
+    val rhs = Bits(INPUT, operandBits+tagBits)
+    val out = Bits(OUTPUT, operandBits+tagBits)
   }
 
   val storegen =
