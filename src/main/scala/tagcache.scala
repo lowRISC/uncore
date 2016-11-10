@@ -19,14 +19,14 @@ trait HasTCParameters extends HasCoherenceAgentParameters
   val nMemTransactors = nMemReleaseTransactors + nMemAcquireTransactors
   val nTagTransactors = p(TCTagTransactors)
 
-  val refillCyclesPerBeat = outerDataBits/rowBits
-  val refillCycles = refillCyclesPerBeat*outerDataBeats
+  val refillCycles = outerDataBeats
 
   val cacheAccDelay = 2 // delay of accessing metadata or data arrays
 
   val rowTags = rowBits / tgHelper.wordBits
   val rowTagBits = tgBits * rowTags
 
+  require(outerDataBits == rowBits)
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(!outerTLParams.withTag && innerTLParams.withTag)
   require(outerTLId == p(TLId))
@@ -219,8 +219,6 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   val (read_cnt, read_done) = Counter(io.data.read.fire() && state === s_READ, refillCycles)
   val (write_cnt, write_done) = Counter(io.data.resp.valid, refillCycles)
 
-  val tl_buffer = Wire(Vec(outerDataBeats, UInt(width=outerDataBits)))
-  tl_buffer := tl_buffer.fromBits(data_buffer.toBits)
   val (tl_cnt, tl_done) = Counter(state === s_WRITE && io.tl.acquire.fire(), outerDataBeats)
 
   val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
@@ -258,7 +256,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
       UInt(nMemTransactors+id),
       tlGetBlockAddr(tl_addr),
       tlGetBeatAddr(tl_addr),
-      tl_buffer(tl_cnt)
+      data_buffer(tl_cnt)
     )
 
   io.tl.grant.ready := state === s_GNT
@@ -326,7 +324,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val meta_tagFlag = Reg(init=Bool(false))
   val fetch_tagFlag = Reg(init=Bool(false))
   val addrTag = xact.addr >> untagBits
-  val write_buf = Wire(Vec(refillCycles, UInt(width=rowBits)))
   val (data_cnt, data_done) = Counter((state === s_D_BW && io.data.write.fire()) ||
                                       (state === s_D_C_REQ && io.data.read.fire()), refillCycles)
   val write_tag = xact.data.orR
@@ -372,13 +369,12 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // data read response
 
   // data array write
-  write_buf := write_buf.fromBits(fetch_buf.toBits)
   io.data.write.bits.id := UInt(id)
   io.data.write.bits.row := Mux(state === s_D_RW, row, data_cnt)
   io.data.write.bits.idx := idx
   io.data.write.bits.way_en := way_en
-  io.data.write.bits.data := Mux(state === s_D_BW, write_buf(data_cnt), xact.data)
-  io.data.write.bits.mask := Mux(state === s_D_BW, ~UInt(1,rowBytes), xact.mask(rowBytes-1,0))
+  io.data.write.bits.data := Mux(state === s_D_BW, fetch_buf(data_cnt), xact.data)
+  io.data.write.bits.mask := Mux(state === s_D_BW, ~UInt(0,rowBytes), xact.mask(rowBytes-1,0))
   io.data.write.valid := state === s_D_RW || state === s_D_BW
 
   // write-back
@@ -426,9 +422,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // data array update function
   def beat_data_update(tl_data:UInt, index:UInt) = {
-    val update_mask = UInt(xact.mask << (row * UInt(rowBits)), width=tlDataBits)
-    val update_data = UInt(xact.data << (row * UInt(rowBits)), width=tlDataBits)
-    Mux(index === tlGetBeatAddr(xact.addr), (tl_data & ~update_mask) | update_data, tl_data)
+    Mux(index === tlGetBeatAddr(xact.addr), (tl_data & ~xact.mask) | xact.data, tl_data)
   }
 
   when(state === s_D_FWB_REQ) {
@@ -509,6 +503,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
           io.xact.resp.valid := Bool(true)
           meta_state := TCMetadata.Dirty
           xact.mask := Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
+          meta_tagFlag := Bool(true)
           state := s_D_RW
         }
       }.otherwise{
@@ -533,10 +528,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   when(state === s_D_FWB_RESP && fetch_done && writeback_done) {
     // F+R/W/C miss
     io.xact.resp.bits.tagUpdate := meta_tagFlag =/= fetch_tagFlag
-    io.xact.resp.bits.data := write_buf(row)
+    io.xact.resp.bits.data := fetch_buf(row)
     io.xact.resp.valid := Bool(true)
     when(TCTagOp.isRead(xact.op)) {
-      xact.data := write_buf(row) // store read data for final xact.resp
+      xact.data := fetch_buf(row) // store read data for final xact.resp
     }
     state := s_D_BW
   }
@@ -619,7 +614,9 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   }
   def inner: ManagerTileLinkIO = io.inner
   def outer: ClientUncachedTileLinkIO = io.outer
-  val coh = ManagerMetadata.onReset
+  def innerPM : Parameters = p.alterPartial({case TLId =>innerTLId})
+  def outerPM : Parameters = p.alterPartial({case TLId =>outerTLId})
+  val coh = ManagerMetadata.onReset(innerPM)
 
   // ------------ tag cache state machine states -------------- //
   // TT.R               read tag table
@@ -904,7 +901,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     addr_block = xact.addr_block,
     addr_beat = oacq_cnt,
     data = o_data(oacq_cnt)
-  )(p.alterPartial({ case TLId => outerTLId }))
+  )(outerPM)
 
   // input grant
   inner.grant.valid := mt_state === ms_IGNT && outer.grant.valid
@@ -952,9 +949,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Enum(UInt(), 6)
   val mt_state = Reg(init = ms_IDLE)
 
-  val i_rows = innerDataBits / rowBits
-  val o_rows = outerDataBits / rowBits
-  val xact  = Reg(new AcquireFromSrc()(p.alterPartial({ case TLId => innerTLId })))
+  require(innerDataBits == rowBits && outerDataBits == rowBits)
+  val xact  = Reg(new AcquireFromSrc()(innerPM))
   val data  = Reg(Vec(refillCycles, UInt(width=rowBits)))
   val tag   = Reg(Vec(refillCycles, UInt(width=rowTagBits)))
   val tmask = Reg(Vec(refillCycles, UInt(width=rowTags)))
@@ -976,14 +972,10 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 
   when(inner.acquire.fire()) {
-    val iacq_data = tgHelper.removeTag(inner.acquire.bits.data)
-    val iacq_tag = tgHelper.extractTag(inner.acquire.bits.data)
-    val iacq_tmask = tgHelper.extractTagMask(inner.acquire.bits.wmask())
-    (0 until i_rows).foreach( i => {
-      data(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_data(i*rowBits+rowBits-1,i*rowBits)
-      tag(iacq_cnt*UInt(i_rows) + UInt(i)) := iacq_tag(i*rowTagBits+rowTagBits-1,i*rowTagBits)
-      tmask(iacq_cnt*UInt(i_rows) + UInt(i))
-    })
+    data(iacq_cnt) := tgHelper.removeTag(inner.acquire.bits.data)
+    tag(iacq_cnt) := tgHelper.extractTag(inner.acquire.bits.data)
+    // currently the wmask of Acquire and Release is wrong?
+    tmask(iacq_cnt) := tgHelper.extractTagMask(inner.acquire.bits.wmask())
   }
   inner.acquire.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
 
@@ -995,7 +987,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     client_xact_id = UInt(id),
     addr_block = xact.addr_block,
     addr_beat = oacq_cnt,
-    data = (Vec((0 until o_rows).map(i => data(oacq_cnt*UInt(o_rows)+UInt(i))))).toBits,
+    data = data(oacq_cnt),
     union = Mux(xact.isBuiltInType(),
       Acquire.makeUnion( // re-assemble union to rectify wmask
         a_type = xact.a_type,
@@ -1006,27 +998,21 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
         alloc = Bool(true)
       ),
       Cat(MT_Q, M_XRD, Bool(true))) // coherent Acquire must be getBlock?
-  )(p.alterPartial({ case TLId => outerTLId }))
+  )(outerPM)
 
   // outer grant
   outer.grant.ready := mt_state === ms_OGNT
   when(outer.grant.fire()) {
-    val ognt_data = outer.grant.bits.data
-    (0 until o_rows).foreach( i => {
-      data(ognt_cnt*UInt(o_rows) + UInt(i)) := ognt_data(i*rowBits+rowBits-1,i*rowBits)
-    })
+    data(ognt_cnt) := outer.grant.bits.data
   }
 
   // inner grant
   inner.grant.valid := mt_state === ms_IGNT && (!inner.grant.bits.hasData() || tc_tt_valid)
-  val ignt_tag = Wire(UInt(width=rowTagBits))
-  ignt_tag := tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
-  val innerTagBits = UInt(tgHelper.sizeOfTag(innerDataBits))
-  val ignt_data =
-    tgHelper.insertTags(
-      (Vec((0 until i_rows).map(i => data(ignt_cnt*UInt(i_rows)+UInt(i))))).toBits,
-      ignt_tag(ignt_cnt*innerTagBits + innerTagBits - UInt(1), ignt_cnt*innerTagBits)
-    )
+  val innerTagBits = tgHelper.sizeOfTag(innerDataBits)
+  val ignt_block_tag = tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
+  val ignt_tag = Wire(UInt(width=innerTagBits))
+  ignt_tag := ignt_block_tag >> ignt_cnt*UInt(innerTagBits)
+  val ignt_data = tgHelper.insertTags(data(ignt_cnt), ignt_tag)
   inner.grant.bits := coh.makeGrant(
     acq = xact,
     manager_xact_id = UInt(id),
@@ -1160,7 +1146,6 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   val memTrackers = relTrackers ++ acqTrackers
 
   val acq_size = acqTrackers.size
-  println(s"nMemReleaseTransactors=$nMemReleaseTransactors nMemTransactors=$nMemTransactors size=$acq_size")
 
   // banked tag trackers
   val tagTrackerInitiators = (0 until nTagTransactors).map( id =>
