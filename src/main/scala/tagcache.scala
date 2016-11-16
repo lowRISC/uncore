@@ -285,6 +285,10 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     state := s_IDLE
   }
 
+  when(io.xact.resp.valid) {
+    printf("Writeback %d 0x%x\n", (state === s_CHECK && enforce_writeback) || state === s_READ, addr_block << blockOffBits)
+  }
+
 }
 
 ////////////////////////////////////////////////////////////////
@@ -333,8 +337,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val fetch_done = Reg(init=Bool(false))
   val fetch_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
   val (fetch_cnt, fetch_cnt_done) = Counter(state === s_D_FWB_RESP && io.tl.grant.fire(), outerDataBeats)
-  val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
-                                io.data.resp.valid, refillCycles)
+  val (check_cnt, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
+                                        io.data.resp.valid, refillCycles)
 
   // transaction request
   xact_queue.ready := state === s_IDLE
@@ -361,7 +365,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // data array read
   io.data.read.bits.id := UInt(id)
-  io.data.read.bits.row := row
+  io.data.read.bits.row := Mux(state === s_D_R_REQ, row, check_cnt)
   io.data.read.bits.idx := idx
   io.data.read.bits.way_en := way_en
   io.data.read.valid := state === s_D_R_REQ || state === s_D_C_REQ
@@ -462,19 +466,19 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   when(io.xact.resp.valid) {
     when(xact.op === TCTagOp.Read && io.xact.resp.bits.hit) {
-      printf("TagXact: (%d) Read 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
+      printf(s"TagXact$id: (%d) Read 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
     }
     when(xact.op === TCTagOp.Read && !io.xact.resp.bits.hit) {
-      printf("TagXact: (%d) Read 0x%x miss\n", io.xact.resp.bits.id, xact.addr)
+      printf(s"TagXact$id: (%d) Read 0x%x miss\n", io.xact.resp.bits.id, xact.addr)
     }
     when(xact.op === TCTagOp.FetchRead) {
-      printf("TagXact: (%d) FetchRead 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
+      printf(s"TagXact$id: (%d) FetchRead 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
     }
     when(xact.op === TCTagOp.Write) {
-      printf("TagXact: (%d) Write 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+      printf(s"TagXact$id: (%d) Write 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
     }
     when(xact.op === TCTagOp.Create) {
-      printf("TagXact: (%d) Create 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+      printf(s"TagXact$id: (%d) Create 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
     }
   }
 
@@ -580,8 +584,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state := s_M_W
   }
   when(state === s_M_W && io.meta.write.fire()) {
-    io.xact.resp.bits.data := xact.data // for F+R
-    io.xact.resp.valid := TCTagOp.isRead(xact.op)
     state := s_IDLE
   }
 
