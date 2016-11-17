@@ -318,6 +318,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // internal signals
   val xact_queue = Queue(io.xact.req, nMemTransactors, true) // enforce temporal order
   val xact = RegEnable(xact_queue.bits, xact_queue.fire())
+  val byte_mask = Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
   val idx = xact.addr(idxBits+blockOffBits-1, blockOffBits)
   val way_en = RegEnable(io.meta.resp.bits.way_en, state === s_M_R_RESP && io.meta.resp.valid)
   val row = xact.addr(blockOffBits-1,rowOffBits)
@@ -337,7 +338,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val fetch_done = Reg(init=Bool(false))
   val fetch_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
   val (fetch_cnt, fetch_cnt_done) = Counter(state === s_D_FWB_RESP && io.tl.grant.fire(), outerDataBeats)
-  val (check_cnt, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
+  val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
                                         io.data.resp.valid, refillCycles)
 
   // transaction request
@@ -365,7 +366,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // data array read
   io.data.read.bits.id := UInt(id)
-  io.data.read.bits.row := Mux(state === s_D_R_REQ, row, check_cnt)
+  io.data.read.bits.row := Mux(state === s_D_C_REQ, data_cnt, row)
   io.data.read.bits.idx := idx
   io.data.read.bits.way_en := way_en
   io.data.read.valid := state === s_D_R_REQ || state === s_D_C_REQ
@@ -374,11 +375,11 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // data array write
   io.data.write.bits.id := UInt(id)
-  io.data.write.bits.row := Mux(state === s_D_RW, row, data_cnt)
+  io.data.write.bits.row := Mux(state === s_D_BW, data_cnt, row)
   io.data.write.bits.idx := idx
   io.data.write.bits.way_en := way_en
   io.data.write.bits.data := Mux(state === s_D_BW, fetch_buf(data_cnt), xact.data)
-  io.data.write.bits.mask := Mux(state === s_D_BW, ~UInt(0,rowBytes), xact.mask(rowBytes-1,0))
+  io.data.write.bits.mask := Mux(state === s_D_BW, ~UInt(0,rowBytes), byte_mask)
   io.data.write.valid := state === s_D_RW || state === s_D_BW
 
   // write-back
@@ -475,10 +476,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       printf(s"TagXact$id: (%d) FetchRead 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
     }
     when(xact.op === TCTagOp.Write) {
-      printf(s"TagXact$id: (%d) Write 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+      printf(s"TagXact$id: (%d) Write 0x%x <= %x using mask %x %d\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask, io.xact.resp.bits.tagUpdate)
     }
     when(xact.op === TCTagOp.Create) {
-      printf(s"TagXact$id: (%d) Create 0x%x <= %x using mask %x\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask)
+      printf(s"TagXact$id: (%d) Create 0x%x <= %x using mask %x %d\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask, io.xact.resp.bits.tagUpdate)
     }
   }
 
@@ -506,7 +507,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
           io.xact.resp.bits.tagUpdate := Bool(true)
           io.xact.resp.valid := Bool(true)
           meta_state := TCMetadata.Dirty
-          xact.mask := Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
           meta_tagFlag := Bool(true)
           state := s_D_RW
         }
@@ -552,7 +552,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }.otherwise{
       // W/C hit, t!=0
       xact.data := data_update
-      xact.mask := Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
       meta_state := TCMetadata.Dirty
       meta_tagFlag := data_update.orR
       state := s_D_RW
@@ -579,7 +578,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state := s_D_C_RESP
   }
   when(state === s_D_C_RESP && check_done) {
-    io.xact.resp.bits.tagUpdate := Bool(true)
+    io.xact.resp.bits.tagFlag := meta_tagFlag || io.data.resp.bits.data =/= UInt(0)
+    io.xact.resp.bits.tagUpdate := !io.xact.resp.bits.tagFlag
     io.xact.resp.valid := Bool(true)
     state := s_M_W
   }
@@ -761,6 +761,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   io.tl_block := tc_state =/= ts_IDLE
 
   // replacement safty check
+  val tm0_create_replace_check = Reg(init=Bool(false))
   io.tag_addr_block := UInt(0)
   io.tag_addr_valid := Bool(false)
   switch(tc_state) {
@@ -774,10 +775,15 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
       io.tag_addr_block := tc_tt_addr >> inner.tlBlockAddrBits
       io.tag_addr_valid := Bool(true)
     }
+    is(ts_TT_C) {
+      // enforce writeback empty TM0 which is just created by TM0_C
+      io.tag_addr_block := tc_tm0_addr >> inner.tlBlockAddrBits
+      io.tag_addr_valid := tm0_create_replace_check
+    }
     is(ts_TM0_W) {
-      // enforce writeback empty TT when clear its TM0 bit
-      io.tag_addr_block := tc_tt_addr >> inner.tlBlockAddrBits
-      io.tag_addr_valid := !tc_xact.tc_tagFlag
+      // enforce writeback empty TT when clear its TM0 bit or the created empty TM0
+      io.tag_addr_block := Mux(tm0_create_replace_check, tc_tm0_addr, tc_tt_addr) >> inner.tlBlockAddrBits
+      io.tag_addr_valid := !tc_xact.tc_tagFlag || tm0_create_replace_check
     }
     is(ts_TM1_W) {
       // enforce writeback empty TM0 when clear its TM1 bit
@@ -846,6 +852,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     }
     when(tc_state === ts_TM0_C) {
       tc_state_next := ts_TT_C
+      tm0_create_replace_check := Bool(true)
     }
     when(tc_state === ts_TT_FR) {
       tc_tt_valid := Bool(true)
@@ -863,6 +870,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     }
     when(tc_state === ts_TM0_W) {
       tc_state_next := Mux(tc_xact.tc_tagUpdate, ts_TM1_W,ts_IDLE)
+      tm0_create_replace_check := Bool(false)
     }
     when(tc_state === ts_TM1_W) {
       tc_state_next := ts_IDLE
