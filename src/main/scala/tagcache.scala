@@ -204,8 +204,9 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     val xact = new TCWBIO().flip
     val data = new TCDataIO
     val tl   = new ClientUncachedTileLinkIO()
-    val addr_block = UInt(OUTPUT, width=tl.tlBlockAddrBits)
-    val addr_match = Bool(INPUT)
+    val addr_block = Vec(nTagTransactors, UInt(width=tlBlockAddrBits)).asInput
+    val addr_match = Vec(nTagTransactors, Bool()).asOutput
+    val mtActive = UInt(INPUT, nMemTransactors)
   }
 
   // check          empty line, check whether it is safe to avoid writeback
@@ -218,22 +219,29 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
   val (read_cnt, read_done) = Counter(io.data.read.fire() && state === s_READ, refillCycles)
   val (write_cnt, write_done) = Counter(io.data.resp.valid, refillCycles)
-
   val (tl_cnt, tl_done) = Counter(state === s_WRITE && io.tl.acquire.fire(), outerDataBeats)
 
   val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
+
+  // a scoreboard to record the replaced empty blocks
+  val scoreboard_addr = Reg(init=Vec.fill(nTagTransactors)(UInt(0,tlBlockAddrBits)))
+  val scoreboard_stat = Reg(init=Vec.fill(nTagTransactors)(UInt(0,nMemTransactors)))
+  val scoreboard_ready = Vec(scoreboard_stat.map(_ === UInt(0)))
+  val scoreboard_index = PriorityEncoder(scoreboard_ready)
+  val scoreboard_match_wb = scoreboard_addr.map(state === s_READ && read_done && _ === Cat(xact.tag, xact.idx))
+  scoreboard_stat.zip(scoreboard_match_wb).foreach{ case(s,m) =>
+    s := Mux(m, UInt(0), s & io.mtActive)
+  }
+  io.addr_match.zipWithIndex.foreach{ case(m,i) => {
+    m := scoreboard_addr.zip(scoreboard_ready).map{
+      case (a, r) => !r && a === io.addr_block(i)
+    }.reduce(_||_)
+  }}
+
   io.xact.req.ready := state === s_IDLE
 
-  // check safe repalcement avoidance condition
-  //   must writeback top-map entries
-  //   must writeback empty lines when someone fetch-reads it
-  //   must writeback empty lines when someone clears its map bit
-  val addr_block = Cat(xact.tag, xact.idx)
-  val enforce_writeback = io.addr_match || tgHelper.is_top(addr_block << blockOffBits)
-  io.addr_block := addr_block
-
   io.xact.resp.bits.id := xact.id
-  io.xact.resp.valid := state === s_CHECK || (state === s_READ && read_done)
+  io.xact.resp.valid := Bool(false)
 
   io.data.read.valid := state === s_READ
   io.data.read.bits := xact
@@ -242,7 +250,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 
   io.data.write.valid := Bool(false)
 
-  when(state === s_CHECK) {
+  when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
     data_buffer := Vec.fill(refillCycles)(UInt(0, rowBits))
   }
   when(io.data.resp.valid) {
@@ -265,9 +273,17 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     state := Mux(io.xact.req.bits.empty, s_CHECK, s_READ)
   }
   when(state === s_CHECK) {
-    state := Mux(enforce_writeback, s_WRITE, s_IDLE)
+    io.xact.resp.valid := Bool(true)
+    when(scoreboard_ready.toBits.orR) {
+      scoreboard_stat(scoreboard_index) := io.mtActive
+      scoreboard_addr(scoreboard_index) := tl_addr >> tlBlockOffsetBits
+      state := s_IDLE
+    }.otherwise{
+      state := s_WRITE
+    }
   }
   when(state === s_READ && read_done) {
+    io.xact.resp.valid := Bool(true)
     // check whether data is available in time considering the accessing delay
     if(outerDataBeats >= cacheAccDelay) {
       state := s_WRITE
@@ -285,8 +301,12 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     state := s_IDLE
   }
 
+  when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
+    printf("Enforced writeback zero block due to full scoreboard.")
+  }
+
   when(io.xact.resp.valid) {
-    printf("Writeback %d 0x%x\n", (state === s_CHECK && enforce_writeback) || state === s_READ, addr_block << blockOffBits)
+    printf("Writeback %d 0x%x\n", (state === s_CHECK && !scoreboard_ready.toBits.orR) || state === s_READ, Cat(xact.tag, xact.idx) << blockOffBits)
   }
 
 }
@@ -301,6 +321,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     val data = new TCDataIO
     val wb   = new TCWBIO
     val tl   = new ClientUncachedTileLinkIO()
+    val fetch_addr = UInt(OUTPUT,tl.tlBlockAddrBits)
+    val fetch_match = Bool(INPUT)
   }
 
   // meta.R             always read metadata first
@@ -340,6 +362,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val (fetch_cnt, fetch_cnt_done) = Counter(state === s_D_FWB_RESP && io.tl.grant.fire(), outerDataBeats)
   val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
                                         io.data.resp.valid, refillCycles)
+
+  io.fetch_addr := xact.addr >> tlBlockOffsetBits
 
   // transaction request
   xact_queue.ready := state === s_IDLE
@@ -431,7 +455,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   when(state === s_D_FWB_REQ) {
-    when(xact.op === TCTagOp.Create) {
+    when(xact.op === TCTagOp.Create || io.fetch_match) {
       (0 until outerDataBeats).foreach(i => {
         fetch_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
       })
@@ -611,8 +635,6 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     val tc = new TCTagXactIO
     val tl_block = Bool(OUTPUT)                                    // start to block other tl transactions
     val tl_addr_block = UInt(OUTPUT, width=inner.tlBlockAddrBits)  // for cache line comparison
-    val tag_addr_block = UInt(OUTPUT, width=inner.tlBlockAddrBits) // for tag cache replacement safty check
-    val tag_addr_valid = Bool(OUTPUT)                              // need safty check on replacement
   }
   def inner: ManagerTileLinkIO = io.inner
   def outer: ClientUncachedTileLinkIO = io.outer
@@ -760,38 +782,6 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   // block memory side transactions
   io.tl_block := tc_state =/= ts_IDLE
 
-  // replacement safty check
-  val tm0_create_replace_check = Reg(init=Bool(false))
-  io.tag_addr_block := UInt(0)
-  io.tag_addr_valid := Bool(false)
-  switch(tc_state) {
-    is(ts_TM0_FR) {
-      // enforce writeback empty TM0 when fetch read it
-      io.tag_addr_block := tc_tm0_addr >> inner.tlBlockAddrBits
-      io.tag_addr_valid := Bool(true)
-    }
-    is(ts_TT_FR) {
-      // enforce writeback empty TT when fetch read it
-      io.tag_addr_block := tc_tt_addr >> inner.tlBlockAddrBits
-      io.tag_addr_valid := Bool(true)
-    }
-    is(ts_TT_C) {
-      // enforce writeback empty TM0 which is just created by TM0_C
-      io.tag_addr_block := tc_tm0_addr >> inner.tlBlockAddrBits
-      io.tag_addr_valid := tm0_create_replace_check
-    }
-    is(ts_TM0_W) {
-      // enforce writeback empty TT when clear its TM0 bit or the created empty TM0
-      io.tag_addr_block := Mux(tm0_create_replace_check, tc_tm0_addr, tc_tt_addr) >> inner.tlBlockAddrBits
-      io.tag_addr_valid := !tc_xact.tc_tagFlag || tm0_create_replace_check
-    }
-    is(ts_TM1_W) {
-      // enforce writeback empty TM0 when clear its TM1 bit
-      io.tag_addr_block := tc_tm0_addr >> inner.tlBlockAddrBits
-      io.tag_addr_valid := !tc_xact.tc_tagFlag
-    }
-  }
-
   // -------------- the shared state machine ----------------- //
   tc_state_next := tc_state
   when(tc_state === ts_IDLE && tc_req_valid) {
@@ -852,7 +842,6 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     }
     when(tc_state === ts_TM0_C) {
       tc_state_next := ts_TT_C
-      tm0_create_replace_check := Bool(true)
     }
     when(tc_state === ts_TT_FR) {
       tc_tt_valid := Bool(true)
@@ -870,7 +859,6 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     }
     when(tc_state === ts_TM0_W) {
       tc_state_next := Mux(tc_xact.tc_tagUpdate, ts_TM1_W,ts_IDLE)
-      tm0_create_replace_check := Bool(false)
     }
     when(tc_state === ts_TM1_W) {
       tc_state_next := ts_IDLE
@@ -1246,8 +1234,11 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   doTcOutputArbitration(wb.io.xact.req, tagTrackers.map(_.io.wb.req))
   doTcInputRouting(wb.io.xact.resp, tagTrackers.map(_.io.wb.resp), nMemTransactors)
 
-  // tag cache replacement safety check
-  wb.io.addr_match := memTrackers.map(t =>
-    t.io.tag_addr_valid && t.io.tag_addr_block === wb.io.addr_block).reduce(_||_)
+  // empty block scoreboard
+  tagTrackers.zipWithIndex.foreach{ case(t,i) => {
+    t.io.fetch_addr <> wb.io.addr_block(i)
+    t.io.fetch_match <> wb.io.addr_match(i)
+  }}
+  wb.io.mtActive := Vec(memTrackers.map(_.io.tl_block)).toBits
 
 }
