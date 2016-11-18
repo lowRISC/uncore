@@ -302,7 +302,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   }
 
   when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
-    printf("Enforced writeback zero block due to full scoreboard.")
+    printf("Enforced writeback zero block due to full scoreboard.\n")
   }
 
   when(io.xact.resp.valid) {
