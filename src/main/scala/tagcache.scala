@@ -302,7 +302,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   }
 
   when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
-    printf("Enforced writeback zero block due to full scoreboard.\n")
+    printf("Enforced writeback zero block 0x%x due to full scoreboard.\n", Cat(xact.tag, xact.idx) << blockOffBits)
   }
 
   when(io.xact.resp.valid) {
@@ -489,6 +489,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }
   }
 
+  when(state === s_D_FWB_REQ && io.fetch_match) {
+    printf(s"TagXact$id: (%d) fetch a zero block 0x%x from writeback scoreboard\n", io.xact.resp.bits.id, io.fetch_addr << tlBlockOffsetBits)
+  }
+
   when(io.xact.resp.valid) {
     when(xact.op === TCTagOp.Read && io.xact.resp.bits.hit) {
       printf(s"TagXact$id: (%d) Read 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
@@ -635,6 +639,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     val tc = new TCTagXactIO
     val tl_block = Bool(OUTPUT)                                    // start to block other tl transactions
     val tl_addr_block = UInt(OUTPUT, width=inner.tlBlockAddrBits)  // for cache line comparison
+    val sb_wb_active = Bool(OUTPUT)                                // active for scoreboard in wb (zero wb)
   }
   def inner: ManagerTileLinkIO = io.inner
   def outer: ClientUncachedTileLinkIO = io.outer
@@ -781,6 +786,9 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
 
   // block memory side transactions
   io.tl_block := tc_state =/= ts_IDLE
+
+  // zero writeback scoreboard
+  io.sb_wb_active := Vec(ts_TM0_FR, ts_TT_FR, ts_TM0_C, ts_TT_C, ts_TT_W, ts_TM0_W).contains(tc_state)
 
   // -------------- the shared state machine ----------------- //
   tc_state_next := tc_state
@@ -1239,6 +1247,6 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
     t.io.fetch_addr <> wb.io.addr_block(i)
     t.io.fetch_match <> wb.io.addr_match(i)
   }}
-  wb.io.mtActive := Vec(memTrackers.map(_.io.tl_block)).toBits
+  wb.io.mtActive := Vec(memTrackers.map(_.io.sb_wb_active)).toBits
 
 }
