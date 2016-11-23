@@ -383,7 +383,11 @@ object Acquire {
       Acquire.putPrefetchType -> Cat(M_XWR, alloc)))
   }
 
-  def fullWriteMask(implicit p: Parameters) = SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits).toUInt
+  // very inconvenient
+  def fullWriteMask(implicit p: Parameters) = SInt(-1,
+    width = if(p(TLKey(p(TLId))).withTag) p(TLKey(p(TLId))).writeMaskBits / 8 * 9
+            else p(TLKey(p(TLId))).writeMaskBits
+  ).toUInt
 
   // Most generic constructor
   def apply(

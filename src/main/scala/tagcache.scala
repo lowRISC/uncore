@@ -204,6 +204,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     val xact = new TCWBIO().flip
     val data = new TCDataIO
     val tl   = new ClientUncachedTileLinkIO()
+    val wb_addr = UInt(OUTPUT, width=tlBlockAddrBits)
     val addr_block = Vec(nTagTransactors, UInt(width=tlBlockAddrBits)).asInput
     val addr_match = Vec(nTagTransactors, Bool()).asOutput
     val mtActive = UInt(INPUT, nMemTransactors)
@@ -224,11 +225,12 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
 
   // a scoreboard to record the replaced empty blocks
+  io.wb_addr := Cat(xact.tag, xact.idx)
   val scoreboard_addr = Reg(init=Vec.fill(nTagTransactors)(UInt(0,tlBlockAddrBits)))
   val scoreboard_stat = Reg(init=Vec.fill(nTagTransactors)(UInt(0,nMemTransactors)))
   val scoreboard_ready = Vec(scoreboard_stat.map(_ === UInt(0)))
   val scoreboard_index = PriorityEncoder(scoreboard_ready)
-  val scoreboard_match_wb = scoreboard_addr.map(state === s_READ && read_done && _ === Cat(xact.tag, xact.idx))
+  val scoreboard_match_wb = scoreboard_addr.map(state === s_READ && read_done && _ === io.wb_addr)
   scoreboard_stat.zip(scoreboard_match_wb).foreach{ case(s,m) =>
     s := Mux(m, UInt(0), s & io.mtActive)
   }
@@ -302,7 +304,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   }
 
   when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
-    printf("Enforced writeback zero block 0x%x due to full scoreboard.\n", Cat(xact.tag, xact.idx) << blockOffBits)
+    printf("Enforced writeback zero block 0x%x due to full scoreboard.\n", io.wb_addr << blockOffBits)
   }
 
   when(io.xact.resp.valid) {
@@ -321,8 +323,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     val data = new TCDataIO
     val wb   = new TCWBIO
     val tl   = new ClientUncachedTileLinkIO()
-    val fetch_addr = UInt(OUTPUT,tl.tlBlockAddrBits)
-    val fetch_match = Bool(INPUT)
+    val match_addr = UInt(OUTPUT,tl.tlBlockAddrBits)
+    val match_fetch = Bool(INPUT)
+    val match_create = Bool(INPUT)
+    val create = Bool(OUTPUT)
   }
 
   // meta.R             always read metadata first
@@ -363,7 +367,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
                                         io.data.resp.valid, refillCycles)
 
-  io.fetch_addr := xact.addr >> tlBlockOffsetBits
+  io.match_addr := xact.addr >> tlBlockOffsetBits
+  io.create := io.xact.resp.valid && xact.op === TCTagOp.Create
 
   // transaction request
   xact_queue.ready := state === s_IDLE
@@ -455,7 +460,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   when(state === s_D_FWB_REQ) {
-    when(xact.op === TCTagOp.Create || io.fetch_match) {
+    when(xact.op === TCTagOp.Create || io.match_fetch) {
       (0 until outerDataBeats).foreach(i => {
         fetch_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
       })
@@ -489,8 +494,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }
   }
 
-  when(state === s_D_FWB_REQ && io.fetch_match) {
-    printf(s"TagXact$id: (%d) fetch a zero block 0x%x from writeback scoreboard\n", io.xact.resp.bits.id, io.fetch_addr << tlBlockOffsetBits)
+  when(state === s_D_FWB_REQ && io.match_fetch) {
+    printf(s"TagXact$id: (%d) fetch a zero block 0x%x from writeback scoreboard\n", io.xact.resp.bits.id, io.match_addr << tlBlockOffsetBits)
   }
 
   when(io.xact.resp.valid) {
@@ -551,6 +556,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       }.otherwise{
         // F+R/W/C miss
         state := s_D_FWB_REQ
+        when(xact.op === TCTagOp.Create && io.match_create) {
+          xact.op := TCTagOp.Write
+          printf(s"TagXact$id: (%d) Degrade Create into Write operation for 0x%x\n", io.xact.resp.bits.id, xact.addr)
+        }
       }
     }
   }
@@ -639,7 +648,11 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     val tc = new TCTagXactIO
     val tl_block = Bool(OUTPUT)                                    // start to block other tl transactions
     val tl_addr_block = UInt(OUTPUT, width=inner.tlBlockAddrBits)  // for cache line comparison
-    val sb_wb_active = Bool(OUTPUT)                                // active for scoreboard in wb (zero wb)
+    val tm0_addr = UInt(OUTPUT, width=inner.tlBlockAddrBits)
+    val tt_addr = UInt(OUTPUT, width=inner.tlBlockAddrBits)
+    val create_tm0 = Bool(OUTPUT)                                  // active for create a TM0 block
+    val create_tt = Bool(OUTPUT)                                   // active for create a TT block
+    val create_rdy = Bool(INPUT)
   }
   def inner: ManagerTileLinkIO = io.inner
   def outer: ClientUncachedTileLinkIO = io.outer
@@ -691,8 +704,12 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     tx_resp_valid := Bool(true)
   }
 
+  when(!tx_req_fire && tc_state =/= ts_IDLE && !io.create_rdy) {
+    printf(s"MemTransactor$id Waits for create scoreboard ready...\n")
+  }
+
   // tag transaction request
-  io.tc.req.valid := !tx_req_fire && tc_state =/= ts_IDLE
+  io.tc.req.valid := !tx_req_fire && tc_state =/= ts_IDLE && io.create_rdy
   io.tc.req.bits.id   := UInt(id)
   io.tc.req.bits.data := UInt(0)
   io.tc.req.bits.mask := UInt(0)
@@ -787,8 +804,11 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   // block memory side transactions
   io.tl_block := tc_state =/= ts_IDLE
 
-  // zero writeback scoreboard
-  io.sb_wb_active := Vec(ts_TM0_FR, ts_TT_FR, ts_TM0_C, ts_TT_C, ts_TT_W, ts_TM0_W).contains(tc_state)
+  // scoreboard
+  io.tm0_addr := tc_tm0_addr >> blockOffBits
+  io.tt_addr := tc_tt_addr >> blockOffBits
+  io.create_tm0 := tc_state === ts_TM0_C
+  io.create_tt := tc_state === ts_TT_C
 
   // -------------- the shared state machine ----------------- //
   tc_state_next := tc_state
@@ -1244,9 +1264,57 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   // empty block scoreboard
   tagTrackers.zipWithIndex.foreach{ case(t,i) => {
-    t.io.fetch_addr <> wb.io.addr_block(i)
-    t.io.fetch_match <> wb.io.addr_match(i)
+    wb.io.addr_block(i) := t.io.match_addr
+    t.io.match_fetch <> wb.io.addr_match(i)
   }}
-  wb.io.mtActive := Vec(memTrackers.map(_.io.sb_wb_active)).toBits
+  wb.io.mtActive := Vec(memTrackers.map(t =>
+    t.io.tl_block && (t.io.tm0_addr === wb.io.wb_addr || t.io.tt_addr === wb.io.wb_addr))).toBits
+
+  // create scoreboard
+  val create_sb_tm0_addr = Reg(init=Vec.fill(nMemTransactors)(UInt(0,io.inner.tlBlockAddrBits)))
+  val create_sb_tm0_stat = Reg(init=Vec.fill(nMemTransactors)(UInt(0,nMemTransactors)))
+  val create_sb_tt_addr = Reg(init=Vec.fill(nMemTransactors)(UInt(0,io.inner.tlBlockAddrBits)))
+  val create_sb_tt_stat = Reg(init=Vec.fill(nMemTransactors)(UInt(0,nMemTransactors)))
+
+  tagTrackers.foreach( t => {
+    t.io.match_create := (0 until nMemTransactors).map( i =>
+      (t.io.match_addr === create_sb_tm0_addr(i) && create_sb_tm0_stat(i) =/= UInt(0)) ||
+      (t.io.match_addr === create_sb_tt_addr(i) && create_sb_tt_stat(i) =/= UInt(0))
+    ).reduce(_||_)
+  })
+
+  (0 until nMemTransactors).foreach( i => {
+    when(memTrackers(i).io.tl_block && create_sb_tm0_stat(i)(i)) {
+      create_sb_tm0_stat(i) := Vec(memTrackers.zipWithIndex.map{ case(t,j) =>
+        if(i==j) Bool(true) else t.io.tl_block && t.io.tm0_addr === create_sb_tm0_addr(i)}).toBits
+    }.elsewhen(create_sb_tm0_stat(i) =/= UInt(0)) {
+      create_sb_tm0_stat(i) := create_sb_tm0_stat(i) & Vec(memTrackers.map(_.io.tl_block)).toBits
+    }.otherwise{
+      tagTrackers.foreach( t => {
+        when(t.io.create && memTrackers(i).io.create_tm0 && t.io.xact.resp.bits.id === UInt(i)) {
+          create_sb_tm0_addr(i) := t.io.match_addr
+          create_sb_tm0_stat(i) := UInt(1) << i
+        }
+      })
+    }
+
+    when(memTrackers(i).io.tl_block && create_sb_tt_stat(i)(i)) {
+      create_sb_tt_stat(i) := Vec(memTrackers.zipWithIndex.map{ case(t,j) =>
+        if(i==j) Bool(true) else t.io.tl_block && t.io.tm0_addr === create_sb_tt_addr(i)}).toBits
+    }.elsewhen(create_sb_tt_stat(i) =/= UInt(0)) {
+      create_sb_tt_stat(i) := create_sb_tt_stat(i) & Vec(memTrackers.map(_.io.tl_block)).toBits
+    }.otherwise {
+      tagTrackers.foreach( t => {
+        when(t.io.create && memTrackers(i).io.create_tt && t.io.xact.resp.bits.id === UInt(i)) {
+          create_sb_tt_addr(i) := t.io.match_addr
+          create_sb_tt_stat(i) := UInt(1) << i
+        }
+      })
+    }
+
+    memTrackers(i).io.create_rdy := (memTrackers(i).io.create_tm0 && create_sb_tm0_stat(i) === UInt(0)) ||
+                                    (memTrackers(i).io.create_tt && create_sb_tt_stat(i) === UInt(0)) ||
+                                    (!memTrackers(i).io.create_tm0 && !memTrackers(i).io.create_tt)
+  })
 
 }

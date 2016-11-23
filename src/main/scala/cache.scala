@@ -200,6 +200,8 @@ trait HasL2HellaCacheParameters extends HasCacheParameters with HasCoherenceAgen
   val nSecondaryMisses = p(NSecondaryMisses)
   val isLastLevelCache = true
   val ignoresWriteMask = !p(ECCCode).isEmpty
+  val rowBitsTagged = if(useTagMem) tgHelper.sizeWithTag(rowBits) else rowBits
+  val wmaskBitsTagged = if(useTagMem) tgHelper.maskSizeWithTag(rowBits/8) else rowBits/8
 }
 
 abstract class L2HellaCacheModule(implicit val p: Parameters) extends Module
@@ -237,7 +239,7 @@ trait HasL2BeatAddr extends HasL2HellaCacheParameters {
 
 trait HasL2Data extends HasL2HellaCacheParameters
     with HasL2BeatAddr {
-  val data = UInt(width = rowBits)
+  val data = UInt(width = rowBitsTagged)
   def hasData(dummy: Int = 0) = Bool(true)
   def hasMultibeatData(dummy: Int = 0) = Bool(refillCycles > 1)
 }
@@ -333,7 +335,7 @@ class L2DataReadReq(implicit p: Parameters) extends L2HellaCacheBundle()(p)
 
 class L2DataWriteReq(implicit p: Parameters) extends L2DataReadReq()(p)
     with HasL2Data {
-  val wmask  = Bits(width = rowBits/8)
+  val wmask  = Bits(width = wmaskBitsTagged)
 }
 
 class L2DataResp(implicit p: Parameters) extends L2HellaCacheBundle()(p)
@@ -356,17 +358,25 @@ class L2DataRWIO(implicit p: Parameters) extends L2HellaCacheBundle()(p)
 class L2DataArray(delay: Int)(implicit p: Parameters) extends L2HellaCacheModule()(p) {
   val io = new L2DataRWIO().flip
 
-  val array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
+  val dataArray = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
+  val tagArray = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
   val ren = !io.write.valid && io.read.valid
   val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.addr_idx, io.read.bits.addr_beat)
   val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.addr_idx, io.write.bits.addr_beat)
-  val wdata = Vec.tabulate(rowBits/8)(i => io.write.bits.data(8*(i+1)-1,8*i))
-  val wmask = io.write.bits.wmask.toBools
-  when (io.write.valid) { array.write(waddr, wdata, wmask) }
+  val dataWdata = Vec.tabulate(rowBits/8)(i => io.write.bits.data(8*(i+1)-1,8*i))
+  val tagWdata = Vec.tabulate(rowBits/8)(i => io.write.bits.data(8*(i+1)-1,8*i))
+  val dataWmask = io.write.bits.wmask.toBools
+  val tagWmask = io.write.bits.wmask.toBools
+  when (io.write.valid) {
+    dataArray.write(waddr, dataWdata, dataWmask)
+    tagArray.write(waddr, tagWdata, tagWmask)
+  }
 
   val r_req = Pipe(io.read.fire(), io.read.bits)
   io.resp := Pipe(r_req.valid, r_req.bits, delay)
-  io.resp.bits.data := Pipe(r_req.valid, array.read(raddr, ren).toBits, delay).bits
+  val dataRdata = Pipe(r_req.valid, dataArray.read(raddr, ren).toBits, delay).bits
+  val tagRdata = Pipe(r_req.valid, tagArray.read(raddr, ren).toBits, delay).bits
+  io.resp.bits.data := tgHelper.insertTags(dataRdata, tagRdata)
   io.read.ready := !io.write.valid
   io.write.ready := Bool(true)
 }
@@ -613,8 +623,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
   val state = Reg(init=s_idle)
 
   // State holding transaction metadata
-  val data_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits)))
-  val wmask_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits/8)))
+  val data_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBitsTagged)))
+  val wmask_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerMaskBitsTagged)))
   val xact_addr_block = Reg{ io.inner.acquire.bits.addr_block }
   val xact_tag_match = Reg{ Bool() }
   val xact_way_en = Reg{ Bits(width = nWays) }
