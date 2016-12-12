@@ -23,8 +23,7 @@ case object CacheId extends Field[Int]
 case object SplitMetadata extends Field[Boolean]
 case object RAMSize extends Field[BigInt]
 
-trait HasCacheParameters {
-  implicit val p: Parameters
+trait HasCacheParameters extends HasTagParameters {
   val nSets = p(NSets)
   val blockOffBits = p(CacheBlockOffsetBits)
   val cacheIdBits = p(CacheIdBits)
@@ -36,6 +35,8 @@ trait HasCacheParameters {
   val isDM = nWays == 1
   val rowBits = p(RowBits)
   val rowBytes = rowBits/8
+  val rowTagBits = tgHelper.tagSize(rowBits)
+  val rowTags = tgHelper.tagMaskSize(rowBits)
   val rowOffBits = log2Up(rowBytes)
   val code = p(ECCCode).getOrElse(new IdentityCode)
   val hasSplitMetadata = p(SplitMetadata)
@@ -238,6 +239,7 @@ trait HasL2BeatAddr extends HasL2HellaCacheParameters {
 trait HasL2Data extends HasL2HellaCacheParameters
     with HasL2BeatAddr {
   val data = UInt(width = rowBits)
+  val tag = UInt(width = rowTagBits)
   def hasData(dummy: Int = 0) = Bool(true)
   def hasMultibeatData(dummy: Int = 0) = Bool(refillCycles > 1)
 }
@@ -334,6 +336,7 @@ class L2DataReadReq(implicit p: Parameters) extends L2HellaCacheBundle()(p)
 class L2DataWriteReq(implicit p: Parameters) extends L2DataReadReq()(p)
     with HasL2Data {
   val wmask  = Bits(width = rowBits/8)
+  val tmask  = Bits(width = rowTags)
 }
 
 class L2DataResp(implicit p: Parameters) extends L2HellaCacheBundle()(p)
@@ -356,19 +359,29 @@ class L2DataRWIO(implicit p: Parameters) extends L2HellaCacheBundle()(p)
 class L2DataArray(delay: Int)(implicit p: Parameters) extends L2HellaCacheModule()(p) {
   val io = new L2DataRWIO().flip
 
-  val array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
+  val data_array = SeqMem(nWays*nSets*refillCycles, Vec(rowBits/8, Bits(width=8)))
   val ren = !io.write.valid && io.read.valid
   val raddr = Cat(OHToUInt(io.read.bits.way_en), io.read.bits.addr_idx, io.read.bits.addr_beat)
   val waddr = Cat(OHToUInt(io.write.bits.way_en), io.write.bits.addr_idx, io.write.bits.addr_beat)
   val wdata = Vec.tabulate(rowBits/8)(i => io.write.bits.data(8*(i+1)-1,8*i))
   val wmask = io.write.bits.wmask.toBools
-  when (io.write.valid) { array.write(waddr, wdata, wmask) }
+  when (io.write.valid) { data_array.write(waddr, wdata, wmask) }
 
   val r_req = Pipe(io.read.fire(), io.read.bits)
   io.resp := Pipe(r_req.valid, r_req.bits, delay)
-  io.resp.bits.data := Pipe(r_req.valid, array.read(raddr, ren).toBits, delay).bits
+  io.resp.bits.data := Pipe(r_req.valid, data_array.read(raddr, ren).toBits, delay).bits
   io.read.ready := !io.write.valid
   io.write.ready := Bool(true)
+
+  if(useTagMem) {
+    val tag_array = SeqMem(nWays*nSets*refillCycles, Vec(rowTags, Bits(width=tgBits)))
+    val tdata = Vec.tabulate(rowTags)(i => io.write.bits.data(tgBits*(i+1)-1,tgBits*i))
+    val tmask = io.write.bits.tmask.toBools
+    when (io.write.valid) { tag_array.write(waddr, tdata, tmask) }
+    io.resp.bits.tag := Pipe(r_req.valid, tag_array.read(raddr, ren).toBits, delay).bits
+  } else {
+    io.resp.bits.tag := UInt(0)
+  }
 }
 
 class L2HellaCacheBank(implicit p: Parameters) extends HierarchicalCoherenceAgent()(p)
