@@ -45,7 +45,6 @@ case class TileLinkParameters(
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
 trait HasTileLinkParameters extends HasTagParameters{
   val tlExternal = p(TLKey(p(TLId)))
-  val tlTagged = tlExternal.withTag
   val tlCoh = tlExternal.coherencePolicy
   val tlNManagers = tlExternal.nManagers
   val tlNCachingClients = tlExternal.nCachingClients
@@ -61,7 +60,9 @@ trait HasTileLinkParameters extends HasTagParameters{
   val tlDataBeats = tlExternal.dataBeats
   val tlDataBits = tlExternal.dataBitsPerBeat
   val tlDataBytes = tlDataBits/8
+  val tlTagBits = tgHelper.tlTagSize(tlDataBits)
   val tlWriteMaskBits = tlExternal.writeMaskBits
+  val tlTagMaskBits = tgHelper.tlTagMaskSize(tlDataBits)
   val tlBeatAddrBits = log2Up(tlDataBeats)
   val tlByteAddrBits = log2Up(tlWriteMaskBits)
   val tlBlockOffsetBits = tlByteAddrBits + (if (tlDataBeats > 1) tlBeatAddrBits else 0)
@@ -137,6 +138,7 @@ trait HasManagerTransactionId extends HasTileLinkParameters {
 /** A single beat of cache block data */
 trait HasTileLinkData extends HasTileLinkBeatId {
   val data = UInt(width = tlDataBits)
+  val tag = UInt(width = tlTagBits)
 
   def hasData(dummy: Int = 0): Bool
   def hasMultibeatData(dummy: Int = 0): Bool
@@ -147,6 +149,7 @@ trait HasTileLinkData extends HasTileLinkBeatId {
 /** An entire cache block of data */
 trait HasTileLinkBlock extends HasTileLinkParameters {
   val data_buffer = Vec(tlDataBeats, UInt(width = tlDataBits))
+  val tag_buffer = Vec(tlDataBeats, UInt(width = tlTagBits))
   val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits))
 }
 
@@ -390,6 +393,7 @@ object Acquire {
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
         data: UInt = UInt(0),
+        tag: UInt = UInt(0),
         union: UInt = UInt(0))
       (implicit p: Parameters): Acquire = {
     val acq = Wire(new Acquire)
@@ -399,6 +403,7 @@ object Acquire {
     acq.addr_block := addr_block
     acq.addr_beat := addr_beat
     acq.data := data
+    acq.tag := tag
     acq.union := union
     acq
   }
@@ -418,6 +423,7 @@ object BuiltInAcquireBuilder {
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
         data: UInt = UInt(0),
+        tag: UInt = UInt(0),
         addr_byte: UInt = UInt(0),
         operand_size: UInt = MT_Q,
         opcode: UInt = UInt(0),
@@ -431,6 +437,7 @@ object BuiltInAcquireBuilder {
         addr_block = addr_block,
         addr_beat = addr_beat,
         data = data,
+        tag = tag,
         union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, alloc))
   }
 }
@@ -541,6 +548,7 @@ object Put {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
+        tag: Option[UInt]= None,
         wmask: Option[UInt]= None,
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
@@ -550,6 +558,7 @@ object Put {
       addr_beat = addr_beat,
       client_xact_id = client_xact_id,
       data = data,
+      tag = tag.getOrElse(UInt(0)),
       wmask = wmask.getOrElse(Acquire.fullWriteMask),
       alloc = alloc)
   }
@@ -574,6 +583,7 @@ object PutBlock {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
+        tag: UInt,
         wmask: UInt)
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -582,6 +592,7 @@ object PutBlock {
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
+      tag = tag,
       wmask = wmask,
       alloc = Bool(true))
   }
@@ -590,6 +601,7 @@ object PutBlock {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
+        tag: UInt = UInt(0),
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -598,6 +610,7 @@ object PutBlock {
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
+      tag = tag,
       wmask = Acquire.fullWriteMask,
       alloc = alloc)
   }
@@ -639,7 +652,8 @@ object PutAtomic {
         addr_byte: UInt,
         atomic_opcode: UInt,
         operand_size: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt = Uint(0))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
       a_type = Acquire.putAtomicType,
@@ -647,6 +661,7 @@ object PutAtomic {
       addr_block = addr_block, 
       addr_beat = addr_beat, 
       data = data,
+      tag = tag,
       addr_byte = addr_byte,
       operand_size = operand_size,
       opcode = atomic_opcode)
@@ -740,7 +755,8 @@ object Release {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt)
       (implicit p: Parameters): Release = {
     val rel = Wire(new Release)
     rel.r_type := r_type
@@ -748,6 +764,7 @@ object Release {
     rel.addr_block := addr_block
     rel.addr_beat := addr_beat
     rel.data := data
+    rel.tag := tag
     rel.voluntary := voluntary
     rel
   }
@@ -759,7 +776,8 @@ object Release {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0))
+        data: UInt = UInt(0),
+        tag: UInt =UInt(0))
       (implicit p: Parameters): ReleaseFromSrc = {
     val rel = Wire(new ReleaseFromSrc)
     rel.client_id := src
@@ -769,6 +787,7 @@ object Release {
     rel.addr_block := addr_block
     rel.addr_beat := addr_beat
     rel.data := data
+    rel.tag := tag
     rel
   }
 }
@@ -849,7 +868,8 @@ object Grant {
         client_xact_id: UInt, 
         manager_xact_id: UInt,
         addr_beat: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt)
       (implicit p: Parameters): Grant = {
     val gnt = Wire(new Grant)
     gnt.is_builtin_type := is_builtin_type
@@ -858,6 +878,7 @@ object Grant {
     gnt.manager_xact_id := manager_xact_id
     gnt.addr_beat := addr_beat
     gnt.data := data
+    gnt.tag := tag
     gnt
   }
 
@@ -868,7 +889,8 @@ object Grant {
         client_xact_id: UInt,
         manager_xact_id: UInt,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0))
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0))
       (implicit p: Parameters): GrantToDst = {
     val gnt = Wire(new GrantToDst)
     gnt.client_id := dst
@@ -878,6 +900,7 @@ object Grant {
     gnt.manager_xact_id := manager_xact_id
     gnt.addr_beat := addr_beat
     gnt.data := data
+    gnt.tag := tag
     gnt
   }
 }
