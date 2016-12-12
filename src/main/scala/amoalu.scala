@@ -4,12 +4,10 @@ package uncore
 import Chisel._
 import cde.{Parameters, Field}
 
-class StoreGen(typ: UInt, addr: UInt, dat: UInt, maxSize: Int, tagBits:Int = 0) {
-  require(tagBits == 0 || maxSize==8)
+class StoreGen(typ: UInt, addr: UInt, dat: UInt, maxSize: Int) {
   val size = typ(log2Up(log2Up(maxSize)+1)-1,0)
   def misaligned =
-    (if (tagBits != 0) typ =/= constants.MemoryOpConstants.MT_T else Bool(true)) &&
-      (addr & ((UInt(1) << size) - UInt(1))(log2Up(maxSize)-1,0)).orR
+    (addr & ((UInt(1) << size) - UInt(1))(log2Up(maxSize)-1,0)).orR
 
   def mask = {
     var res = UInt(1)
@@ -18,38 +16,24 @@ class StoreGen(typ: UInt, addr: UInt, dat: UInt, maxSize: Int, tagBits:Int = 0) 
       val lower = Mux(addr(i), UInt(0), res)
       res = Cat(upper, lower)
     }
-    if(tagBits != 0)
-      Mux(typ === constants.MemoryOpConstants.MT_T, UInt(1 << maxSize), UInt(res, maxSize+1))
-    else
-      res
+    res
   }
 
-  def bit_mask = {
-    if(tagBits != 0)
-      Cat(~UInt(0,tagBits), FillInterleaved(8, mask(maxSize-1,0)))
-    else
-      FillInterleaved(8, mask(maxSize-1,0))
-  }
-
-  protected def genData(i: Int): UInt = {
-    val isTag = if (tagBits != 0) typ === constants.MemoryOpConstants.MT_T else Bool(false)
-    Mux(isTag, dat(tagBits-1,0) << (8*maxSize),
-      if (i >= log2Up(maxSize)) Cat(UInt(0, tagBits), dat)
-      else Mux(size === UInt(i), Cat(UInt(0, tagBits), Fill(1 << (log2Up(maxSize)-i), dat((8 << i)-1,0))), genData(i+1)))
-  }
+  protected def genData(i: Int): UInt =
+    if (i >= log2Up(maxSize)) dat
+    else Mux(size === UInt(i), Fill(1 << (log2Up(maxSize)-i), dat((8 << i)-1,0)), genData(i+1))
 
   def data = genData(0)
   def wordData = genData(2)
 }
 
-class StoreGenAligned(typ: UInt, addr: UInt, dat: UInt, maxSize: Int) extends StoreGen(typ, addr, dat, maxSize, 0) {
+class StoreGenAligned(typ: UInt, addr: UInt, dat: UInt, maxSize: Int) extends StoreGen(typ, addr, dat, maxSize) {
   override def genData(i: Int) = dat
 }
 
-class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool, maxSize: Int, tagBits:Int = 0) {
-  private val t = new StoreGen(typ, addr, dat, maxSize, tagBits)
-  private val signed = (if(tagBits == 0) Bool(true) else typ =/= constants.MemoryOpConstants.MT_T) &&
-                       !typ(log2Up(log2Up(maxSize)+1))
+class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool, maxSize: Int) {
+  private val t = new StoreGen(typ, addr, dat, maxSize)
+  private val signed = !typ(log2Up(log2Up(maxSize)+1))
 
   private def genData(logMinSize: Int): UInt = {
     var res = dat
@@ -60,29 +44,28 @@ class LoadGen(typ: UInt, addr: UInt, dat: UInt, zero: Bool, maxSize: Int, tagBit
       val zeroed = Mux(doZero, UInt(0), shifted)
       res = Cat(Mux(t.size === UInt(i) || doZero, Fill(8*maxSize-pos, signed && zeroed(pos-1)), res(8*maxSize-1,pos)), zeroed)
     }
-    if(tagBits == 0) res(8*maxSize-1,0)
-    else Mux(typ === constants.MemoryOpConstants.MT_T, UInt(dat >> 8*maxSize, 8*maxSize), res(8*maxSize-1,0))
+    res
   }
 
   def wordData = genData(2)
   def data = genData(0)
 }
 
-class AMOALU(rhsIsAligned: Boolean = false, tagBits:Int = 0)(implicit p: Parameters) extends CacheModule()(p) {
+class AMOALU(rhsIsAligned: Boolean = false)(implicit p: Parameters) extends CacheModule()(p) {
   val operandBits = p(AmoAluOperandBits)
   require(operandBits == 32 || operandBits == 64)
   val io = new Bundle {
     val addr = Bits(INPUT, blockOffBits)
     val cmd = Bits(INPUT, M_SZ)
     val typ = Bits(INPUT, MT_SZ)
-    val lhs = Bits(INPUT, operandBits+tagBits)
-    val rhs = Bits(INPUT, operandBits+tagBits)
-    val out = Bits(OUTPUT, operandBits+tagBits)
+    val lhs = Bits(INPUT, operandBits)
+    val rhs = Bits(INPUT, operandBits)
+    val out = Bits(OUTPUT, operandBits)
   }
 
   val storegen =
     if(rhsIsAligned) new StoreGenAligned(io.typ, io.addr, io.rhs, operandBits/8)
-    else new StoreGen(io.typ, io.addr, io.rhs, operandBits/8, tagBits)
+    else new StoreGen(io.typ, io.addr, io.rhs, operandBits/8)
   val rhs = storegen.wordData
   
   val sgned = io.cmd === M_XA_MIN || io.cmd === M_XA_MAX
@@ -117,7 +100,6 @@ class AMOALU(rhsIsAligned: Boolean = false, tagBits:Int = 0)(implicit p: Paramet
             Mux(Mux(less, min, max), io.lhs,
             storegen.data)))))
 
-  //val wmask = FillInterleaved(8, storegen.mask)
-  val wmask = storegen.bit_mask
+  val wmask = FillInterleaved(8, storegen.mask)
   io.out := wmask & out | ~wmask & io.lhs
 }
