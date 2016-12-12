@@ -52,8 +52,8 @@ class TagUtil(
   require(isPow2(mapRatio))
   require(mapRatio >= tagRatio)                         // no extra space for map
 
-  def tlTagSize(dataSize:Int) = dataSize / wordBits * tagBits
-  def tlTagMaskSize(dataSize:Int) = dataSize / wordBits
+  def tagSize(dataSize:Int) = dataSize / wordBits * tagBits
+  def tagMaskSize(dataSize:Int) = dataSize / wordBits
 
   // convert physical address to tag table address / row byte index
   def pa2tta(addr: UInt): UInt = ((addr - UInt(memBase)) >> unTagBits) + UInt(tableBase)

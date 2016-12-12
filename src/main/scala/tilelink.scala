@@ -60,9 +60,9 @@ trait HasTileLinkParameters extends HasTagParameters{
   val tlDataBeats = tlExternal.dataBeats
   val tlDataBits = tlExternal.dataBitsPerBeat
   val tlDataBytes = tlDataBits/8
-  val tlTagBits = tgHelper.tlTagSize(tlDataBits)
+  val tlTagBits = tgHelper.tagSize(tlDataBits)
   val tlWriteMaskBits = tlExternal.writeMaskBits
-  val tlTagMaskBits = tgHelper.tlTagMaskSize(tlDataBits)
+  val tlTagMaskBits = if(useTagMem) tgHelper.tagSize(tlDataBits) else 0
   val tlBeatAddrBits = log2Up(tlDataBeats)
   val tlByteAddrBits = log2Up(tlWriteMaskBits)
   val tlBlockOffsetBits = tlByteAddrBits + (if (tlDataBeats > 1) tlBeatAddrBits else 0)
@@ -71,7 +71,7 @@ trait HasTileLinkParameters extends HasTagParameters{
   val tlMemoryOperandSizeBits = MT_SZ
   val tlAcquireTypeBits = max(log2Up(Acquire.nBuiltInTypes), 
                               tlCoh.acquireTypeWidth)
-  val tlAcquireUnionBits = max(tlWriteMaskBits,
+  val tlAcquireUnionBits = max(tlWriteMaskBits + tlTagMaskBits,
                                  (tlByteAddrBits +
                                    tlMemoryOperandSizeBits +
                                    tlMemoryOpcodeBits)) + 1
@@ -150,7 +150,7 @@ trait HasTileLinkData extends HasTileLinkBeatId {
 trait HasTileLinkBlock extends HasTileLinkParameters {
   val data_buffer = Vec(tlDataBeats, UInt(width = tlDataBits))
   val tag_buffer = Vec(tlDataBeats, UInt(width = tlTagBits))
-  val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits))
+  val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits + tlTagMaskBits))
 }
 
 /** The id of a client source or destination. Used in managers. */
@@ -198,8 +198,15 @@ trait HasAcquireUnion extends HasTileLinkParameters {
         union(tlWriteMaskBits, 1),
         UInt(0, width = tlWriteMaskBits)))
   }
+  /** Tag write mask for [[uncore.Put]], [[uncore.PutBlock]], [[uncore.PutAtomic]] */
+  def tmask(dummy: Int = 0): UInt = if (useTagMem) {
+    Mux(isBuiltInType(Acquire.putBlockType) || isBuiltInType(Acquire.putType),
+      union(tlTagMaskBits+tlWriteMaskBits, tlWriteMaskBits+1),
+      UInt(0, width = tlWriteMaskBits))
+  } else UInt(0)
   /** Full, beat-sized writemask */
   def full_wmask(dummy: Int = 0) = FillInterleaved(8, wmask())
+  def full_tmask(dummy: Int = 0) = FillInterLeaved(tgBits, tmask())
 }
 
 trait HasAcquireType extends HasTileLinkParameters {
@@ -372,18 +379,20 @@ object Acquire {
         operand_size: UInt,
         opcode: UInt,
         wmask: UInt,
+        tmask: UInt,
         alloc: Bool): UInt = {
     MuxLookup(a_type, UInt(0), Array(
       Acquire.getType       -> Cat(addr_byte, operand_size, opcode, alloc),
       Acquire.getBlockType  -> Cat(operand_size, opcode, alloc),
-      Acquire.putType       -> Cat(wmask, alloc),
-      Acquire.putBlockType  -> Cat(wmask, alloc),
+      Acquire.putType       -> Cat(tmask, wmask, alloc),
+      Acquire.putBlockType  -> Cat(tmask, wmask, alloc),
       Acquire.putAtomicType -> Cat(addr_byte, operand_size, opcode, alloc),
       Acquire.getPrefetchType -> Cat(M_XRD, alloc),
       Acquire.putPrefetchType -> Cat(M_XWR, alloc)))
   }
 
   def fullWriteMask(implicit p: Parameters) = SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits).toUInt
+  def fullTagMask(implicit p: Parameters) = if(p(UseTagMem)) SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits / 8).toUInt else SInt(0)
 
   // Most generic constructor
   def apply(
@@ -428,6 +437,7 @@ object BuiltInAcquireBuilder {
         operand_size: UInt = MT_Q,
         opcode: UInt = UInt(0),
         wmask: UInt = UInt(0),
+        tmask: UInt = UInt(0),
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     Acquire(
@@ -438,7 +448,7 @@ object BuiltInAcquireBuilder {
         addr_beat = addr_beat,
         data = data,
         tag = tag,
-        union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, alloc))
+        union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, tmask, alloc))
   }
 }
 
@@ -550,6 +560,7 @@ object Put {
         data: UInt,
         tag: Option[UInt]= None,
         wmask: Option[UInt]= None,
+        tmask: Option[UInt]= None,
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -560,6 +571,7 @@ object Put {
       data = data,
       tag = tag.getOrElse(UInt(0)),
       wmask = wmask.getOrElse(Acquire.fullWriteMask),
+      tmask = tmask.getOrElse(Acquire.fullTagMask),
       alloc = alloc)
   }
 }
@@ -584,7 +596,8 @@ object PutBlock {
         addr_beat: UInt,
         data: UInt,
         tag: UInt,
-        wmask: UInt)
+        wmask: UInt,
+        tmask: UInt)
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
       a_type = Acquire.putBlockType,
@@ -594,6 +607,7 @@ object PutBlock {
       data = data,
       tag = tag,
       wmask = wmask,
+      tmask = tmask,
       alloc = Bool(true))
   }
   def apply(
@@ -612,6 +626,7 @@ object PutBlock {
       data = data,
       tag = tag,
       wmask = Acquire.fullWriteMask,
+      tmask = Acquire.fullTagMask,
       alloc = alloc)
   }
 }
