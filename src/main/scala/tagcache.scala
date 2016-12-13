@@ -28,7 +28,6 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 
   require(outerDataBits == rowBits)
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
-  require(!outerTLParams.withTag && innerTLParams.withTag)
   require(outerTLId == p(TLId))
 }
 
@@ -900,10 +899,8 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IREL :: ms_OACQ :: ms_IGNT :: Nil = Enum(UInt(), 4)
   val mt_state = Reg(init = ms_IDLE)
 
-  val xact = Reg(new BufferedReleaseFromSrc()(p.alterPartial({ case TLId => innerTLId })))
-  val i_data = Wire(Vec(innerDataBeats, UInt(width=innerDataBits)))
-  val i_tag  = Wire(Vec(innerDataBeats, UInt(width=tgHelper.sizeOfTag(innerDataBits))))
-  val o_data = Wire(Vec(outerDataBeats, UInt(width=outerDataBits)))
+  require(innerTLId == outerTLId)
+  val xact = Reg(new BufferedReleaseFromSrc()(innerPM))
 
   val irel_done = connectIncomingDataBeatCounter(inner.release)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
@@ -911,22 +908,17 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // inner release
   when(inner.release.fire()) {
     xact.data_buffer(inner.release.bits.addr_beat) := inner.release.bits.data
+    xact.tag_buffer(inner.release.bits.addr_beat) := inner.release.bits.tag
   }
   inner.release.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IREL
 
-  (0 until innerDataBeats).foreach(i => {
-    i_data(i) := tgHelper.removeTag(xact.data_buffer(i))
-    i_tag(i) := tgHelper.extractTag(xact.data_buffer(i))
-  })
-
   // output acquire
   outer.acquire.valid := mt_state === ms_OACQ
-  o_data := o_data.fromBits(i_data.toBits)
   outer.acquire.bits := PutBlock(
     client_xact_id = UInt(id),
     addr_block = xact.addr_block,
     addr_beat = oacq_cnt,
-    data = o_data(oacq_cnt)
+    data = xact.data_buffer(oacq_cnt)
   )(outerPM)
 
   // input grant
@@ -944,7 +936,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 
   when(mt_state === ms_OACQ && !tc_wdata_valid) {
-    tc_xact.mem_data := i_tag.toBits << (tc_tt_byte_index * UInt(8))
+    tc_xact.mem_data := xact.tag_buffer.toBits << (tc_tt_byte_index * UInt(8))
     tc_xact.mem_mask := ~UInt(0,tgHelper.cacheBlockTagBits) << (tc_tt_byte_index * UInt(8))
     tc_wdata_valid := Bool(true)
   }
@@ -975,11 +967,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Enum(UInt(), 6)
   val mt_state = Reg(init = ms_IDLE)
 
-  require(innerDataBits == rowBits && outerDataBits == rowBits)
-  val xact  = Reg(new AcquireFromSrc()(innerPM))
-  val data  = Reg(Vec(refillCycles, UInt(width=rowBits)))
-  val tag   = Reg(Vec(refillCycles, UInt(width=rowTagBits)))
-  val tmask = Reg(Vec(refillCycles, UInt(width=rowTags)))
+  require(innerTLId == outerTLId)
+  val xact  = Reg(new BufferedAcquireFromSrc()(innerPM))
 
   val iacq_cnt = inner.acquire.bits.addr_beat
   val iacq_done = connectIncomingDataBeatCounter(inner.acquire)
@@ -991,17 +980,16 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // inner acquire
   when(mt_state === ms_IDLE) {
     (0 until refillCycles).foreach( i => {
-      data(i) := UInt(0)
-      tag(i) := UInt(0)
-      tmask(i) := UInt(0)
+      xact.wmask_buffer(i) := UInt(0)
+      xact.tmask_buffer(i) := UInt(0)
     })
   }
 
   when(inner.acquire.fire()) {
-    data(iacq_cnt) := tgHelper.removeTag(inner.acquire.bits.data)
-    tag(iacq_cnt) := tgHelper.extractTag(inner.acquire.bits.data)
-    // currently the wmask of Acquire and Release is wrong?
-    tmask(iacq_cnt) := tgHelper.extractTagMask(inner.acquire.bits.wmask())
+    xact.data_buffer(iacq_cnt) := inner.acquire.bits.data
+    xact.wmask_buffer(iacq_cnt) := inner.acquire.bits.wmask()
+    xact.tag_buffer(iacq_cnt) := inner.acquire.bits.tag
+    xact.tmask_buffer(iacq_cnt) := inner.acquire.bits.tmask()
   }
   inner.acquire.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
 
@@ -1013,14 +1001,16 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     client_xact_id = UInt(id),
     addr_block = xact.addr_block,
     addr_beat = oacq_cnt,
-    data = data(oacq_cnt),
+    data = xact.data_buffer(oacq_cnt),
+    tag = xact.tag_buffer(oacq_cnt),
     union = Mux(xact.isBuiltInType(),
       Acquire.makeUnion( // re-assemble union to rectify wmask
         a_type = xact.a_type,
         addr_byte = xact.addr_byte(),
         operand_size = xact.op_size(),
         opcode = xact.op_code(),
-        wmask = tgHelper.removeTagMask(xact.wmask()),
+        wmask = xact.wmask_buffer(oacq_cnt)),
+        tmask = xact.tmask_buffer(oacq_cnt)),
         alloc = Bool(true)
       ),
       Cat(MT_Q, M_XRD, Bool(true))) // coherent Acquire must be getBlock?
@@ -1029,21 +1019,20 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // outer grant
   outer.grant.ready := mt_state === ms_OGNT
   when(outer.grant.fire()) {
-    data(ognt_cnt) := outer.grant.bits.data
+    xact.data_buffer(ognt_cnt) := outer.grant.bits.data
   }
 
   // inner grant
   inner.grant.valid := mt_state === ms_IGNT && (!inner.grant.bits.hasData() || tc_tt_valid)
-  val innerTagBits = tgHelper.sizeOfTag(innerDataBits)
   val ignt_block_tag = tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
-  val ignt_tag = Wire(UInt(width=innerTagBits))
-  ignt_tag := ignt_block_tag >> ignt_cnt*UInt(innerTagBits)
-  val ignt_data = tgHelper.insertTags(data(ignt_cnt), ignt_tag)
+  val ignt_tag = Wire(Vec(innerDataBeats, UInt(width=innerTagBits)))
+  ignt_tag := ignt_tag.fromBits(ignt_block_tag(tgHelper.cacheBlockTagBits-1,0))
   inner.grant.bits := coh.makeGrant(
     acq = xact,
     manager_xact_id = UInt(id),
     addr_beat = ignt_cnt,
-    data = ignt_data
+    data = xact.data_buffer(ignt_cnt),
+    tag = ignt_tag(ignt_cnt)
   )
 
   // inner finish
@@ -1059,8 +1048,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 
   when(mt_state === ms_OACQ && !tc_wdata_valid) {
-    tc_xact.mem_data := tag.toBits << (tc_tt_byte_index * UInt(8))
-    tc_xact.mem_mask := FillInterleaved(tgBits, tmask.toBits) << (tc_tt_byte_index * UInt(8))
+    tc_xact.mem_data := xact.tag_buffer.toBits << (tc_tt_byte_index * UInt(8))
+    tc_xact.mem_mask := FillInterleaved(tgBits, xact.tmask_buffer.toBits) << (tc_tt_byte_index * UInt(8))
     tc_wdata_valid := Bool(true)
   }
 
