@@ -13,8 +13,7 @@ case object InnerTLId extends Field[String]
 /** Identifies the TLId of the outer network in a hierarchical cache controller */ 
 case object OuterTLId extends Field[String]
 
-trait HasCoherenceAgentParameters {
-  implicit val p: Parameters
+trait HasCoherenceAgentParameters extends HasTagParameters {
   val nReleaseTransactors = 1
   val nAcquireTransactors = p(NAcquireTransactors)
   val nTransactors = nReleaseTransactors + nAcquireTransactors
@@ -25,11 +24,15 @@ trait HasCoherenceAgentParameters {
   val outerBeatAddrBits = log2Up(outerDataBeats)
   val outerByteAddrBits = log2Up(outerDataBits/8)
   val outerWriteMaskBits = outerTLParams.writeMaskBits
+  val outerTagBits = tgHelper.tagSize(outerDataBits)
+  val outerTagMaskBits = if(useTagMem) tgHelper.tagMaskSize(outerDataBits) else 0
   val innerTLId = p(InnerTLId)
   val innerTLParams = p(TLKey(innerTLId))
   val innerDataBeats = innerTLParams.dataBeats
   val innerDataBits = innerTLParams.dataBitsPerBeat
   val innerWriteMaskBits = innerTLParams.writeMaskBits
+  val innerTagBits = tgHelper.tagSize(innerDataBits)
+  val innerTagMaskBits = if(useTagMem) tgHelper.tagMaskSize(innerDataBits) else 0
   val innerBeatAddrBits = log2Up(innerDataBeats)
   val innerByteAddrBits = log2Up(innerDataBits/8)
   val maxManagerXacts = innerTLParams.maxManagerXacts

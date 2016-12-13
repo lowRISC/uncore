@@ -150,7 +150,8 @@ trait HasTileLinkData extends HasTileLinkBeatId {
 trait HasTileLinkBlock extends HasTileLinkParameters {
   val data_buffer = Vec(tlDataBeats, UInt(width = tlDataBits))
   val tag_buffer = Vec(tlDataBeats, UInt(width = tlTagBits))
-  val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits + tlTagMaskBits))
+  val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits))
+  val tmask_buffer = Vec(tlDataBeats, UInt(width = if(useTagMem) tlTagMaskBits else 1))
 }
 
 /** The id of a client source or destination. Used in managers. */

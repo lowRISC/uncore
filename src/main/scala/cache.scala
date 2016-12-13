@@ -555,7 +555,10 @@ class L2VoluntaryReleaseTracker(trackerId: Int)(implicit p: Parameters) extends 
   // Accept a voluntary Release (and any further beats of data)
   pending_irel_beats := (pending_irel_beats & dropPendingBitWhenBeatHasData(io.inner.release))
   io.inner.release.ready := ((state === s_idle) && io.irel().isVoluntary()) || pending_irel_beats.orR
-  when(io.inner.release.fire()) { xact.data_buffer(io.irel().addr_beat) := io.irel().data }
+  when(io.inner.release.fire()) {
+    xact.data_buffer(io.irel().addr_beat) := io.irel().data
+    xact.tag_buffer(io.irel().addr_beat) := io.irel().tag
+  }
 
   // Begin a transaction by getting the current block metadata
   io.meta.read.valid := state === s_meta_read
@@ -574,6 +577,8 @@ class L2VoluntaryReleaseTracker(trackerId: Int)(implicit p: Parameters) extends 
   io.data.write.bits.addr_beat := curr_write_beat
   io.data.write.bits.wmask := ~UInt(0, io.data.write.bits.wmask.getWidth)
   io.data.write.bits.data := xact.data_buffer(curr_write_beat)
+  io.data.write.bits.tmask := ~UInt(0, io.data.write.bits.tmask.getWidth)
+  io.data.write.bits.tag := xact.tag_buffer(curr_write_beat)
 
   // Send an acknowledgement
   io.inner.grant.valid := state === s_busy && pending_ignt && !pending_irel_beats.orR
@@ -628,6 +633,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
   // State holding transaction metadata
   val data_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits)))
   val wmask_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits/8)))
+  val tag_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerTagBits)))
+  val tmask_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerTagMaskBits)))
   val xact_addr_block = Reg{ io.inner.acquire.bits.addr_block }
   val xact_tag_match = Reg{ Bool() }
   val xact_way_en = Reg{ Bits(width = nWays) }
@@ -751,7 +758,7 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
 
   // Utility function for applying any buffered stored data to the cache line
   // before storing it back into the data array
-  def mergeData(dataBits: Int)(beat: UInt, incoming: UInt) {
+  def mergeData(dataBits: Int)(beat: UInt, incoming: UInt, incoming_tag: UInt) {
     val old_data = incoming     // Refilled, written back, or de-cached data
     val new_data = data_buffer(beat) // Newly Put data is already in the buffer
     amoalu.io.lhs := old_data >> (xact_amo_shift_bytes << 3)
@@ -762,22 +769,26 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
                                         amoalu.io.out << (xact_amo_shift_bytes << 3),
                                         new_data)
     when(xact.is(Acquire.putAtomicType) && xact.addr_beat === beat) { amo_result := old_data }
+    val old_tag = incoming_tag
+    val new_tag = tag_buffer(beat)
+    val tmask = FillInterleaved(tgBits, tmask_buffer(beat))
+    tag_buffer(beat) := ~tmask & old_tag | tmask & new_tag
   }
 
   // TODO: Deal with the possibility that rowBits != tlDataBits
   def mergeDataInternal[T <: L2HellaCacheBundle with HasL2Data with HasL2BeatAddr](in: ValidIO[T]) {
-    when(in.valid) { mergeData(rowBits)(in.bits.addr_beat, in.bits.data) }
+    when(in.valid) { mergeData(rowBits)(in.bits.addr_beat, in.bits.data, in.bits.tag) }
   }
 
   def mergeDataInner[T <: TLBundle with HasTileLinkData with HasTileLinkBeatId](in: DecoupledIO[T]) {
     when(in.fire() && in.bits.hasData()) { 
-      mergeData(innerDataBits)(in.bits.addr_beat, in.bits.data)
+      mergeData(innerDataBits)(in.bits.addr_beat, in.bits.data, in.bits.tag)
     }
   }
 
   def mergeDataOuter[T <: TLBundle with HasTileLinkData with HasTileLinkBeatId](in: DecoupledIO[T]) {
     when(in.fire() && in.bits.hasData()) { 
-      mergeData(outerDataBits)(in.bits.addr_beat, in.bits.data)
+      mergeData(outerDataBits)(in.bits.addr_beat, in.bits.data, in.bits.tag)
     }
   }
 
@@ -834,6 +845,10 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
     val full = FillInterleaved(8, io.iacq().wmask())
     data_buffer(beat) := (~full & data_buffer(beat)) | (full & io.iacq().data)
     wmask_buffer(beat) := io.iacq().wmask() | wmask_buffer(beat) // assumes wmask_buffer is zeroed
+
+    val full_tag = FillInterleaved(tgBits, io.iacq().tmask())
+    tag_buffer(beat) := (~full_tag & tag_buffer(beat)) | (full_tag & io.iacq().tag)
+    tmask_buffer(beat) := io.iacq().tmask() | tmask_buffer(beat)
   }
 
   // Enqueue some metadata information that we'll use to make coherence updates with later
@@ -918,10 +933,12 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
       addr_block = xact_addr_block,
       addr_beat = oacq_data_idx,
       data = data_buffer(oacq_data_idx),
+      tag = tag_buffer(oacq_data_idx),
       addr_byte = xact_addr_byte,
       operand_size = xact_op_size,
       opcode = xact_op_code,
       wmask = wmask_buffer(oacq_data_idx),
+      tmask = tmask_buffer(oacq_data_idx),
       alloc = Bool(false))
       (p.alterPartial({ case TLId => p(OuterTLId)})))
 
@@ -975,6 +992,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
   io.data.write.bits.addr_beat := curr_write_beat
   io.data.write.bits.wmask := ~UInt(0, io.data.write.bits.wmask.getWidth)
   io.data.write.bits.data := data_buffer(curr_write_beat)
+  io.data.write.bits.tmask := ~UInt(0, io.data.write.bits.tmask.getWidth)
+  io.data.write.bits.tag := tag_buffer(curr_write_beat)
 
   // soon as the data is released, granted, put, or read from the cache
   ignt_data_ready := ignt_data_ready |
@@ -1002,7 +1021,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
                               manager_xact_id = UInt(trackerId), 
                               data = Mux(xact.is(Acquire.putAtomicType),
                                        amo_result,
-                                       data_buffer(ignt_data_idx)))
+                                       data_buffer(ignt_data_idx),
+                                       tag_buffer(ignt_data_idx)))
   val grant_from_release = pending_coh.inner.makeGrant(xact_vol_irel)
   io.inner.grant.bits := Mux(pending_vol_ignt, grant_from_release, grant_from_acquire)
   io.inner.grant.bits.addr_beat := ignt_data_idx // override based on outgoing counter
@@ -1100,7 +1120,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
   }
   when(state === s_outer_acquire && oacq_data_done) { state := s_busy }
   when(state === s_busy && all_pending_done) {
-    wmask_buffer.foreach { w => w := UInt(0) } // This is the only reg that must be clear in s_idle
+    wmask_buffer.foreach { w => w := UInt(0) } // These are the only regs that must be clear in s_idle
+    tmask_buffer.foreach { w => w := UInt(0) } // These are the only regs that must be clear in s_idle
     state := Mux(pending_meta_write, s_meta_write, s_idle)
   }
   when(state === s_meta_write && io.meta.write.ready) { state := s_idle }
@@ -1132,6 +1153,7 @@ class L2WritebackUnit(trackerId: Int)(implicit p: Parameters) extends L2XactTrac
 
   val xact = Reg(new L2WritebackReq)
   val data_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits)))
+  val tag_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerTagBits)))
   val xact_vol_ir_r_type = Reg{ io.irel().r_type }
   val xact_vol_ir_src = Reg{ io.irel().client_id }
   val xact_vol_ir_client_xact_id = Reg{ io.irel().client_xact_id }
@@ -1207,7 +1229,10 @@ class L2WritebackUnit(trackerId: Int)(implicit p: Parameters) extends L2XactTrac
                                 xact.coh.outer))
   when(io.inner.release.fire()) {
     xact.coh := pending_coh_on_irel
-    when(io.irel().hasData()) { data_buffer(io.irel().addr_beat) := io.irel().data }
+    when(io.irel().hasData()) {
+      data_buffer(io.irel().addr_beat) := io.irel().data
+      tag_buffer(io.irel().addr_beat) := io.irel().tag
+    }
     when(irel_can_merge) {
       xact_vol_ir_r_type := io.irel().r_type
       xact_vol_ir_src := io.irel().client_id
@@ -1231,6 +1256,7 @@ class L2WritebackUnit(trackerId: Int)(implicit p: Parameters) extends L2XactTrac
                      addPendingBitInternal(io.data.read)
   when(io.data.resp.valid) { 
     data_buffer(io.data.resp.bits.addr_beat) := io.data.resp.bits.data
+    tag_buffer(io.data.resp.bits.addr_beat) := io.data.resp.bits.tag
   }
 
   // Once the data is buffered we can write it back to outer memory
@@ -1243,7 +1269,8 @@ class L2WritebackUnit(trackerId: Int)(implicit p: Parameters) extends L2XactTrac
                              client_xact_id = UInt(trackerId),
                              addr_block = xact_addr_block,
                              addr_beat = orel_data_idx,
-                             data = data_buffer(orel_data_idx))
+                             data = data_buffer(orel_data_idx),
+                             tag = tag_buffer(orel_data_idx))
 
   // Ack a voluntary release if we got one
   io.inner.grant.valid := pending_vol_ignt
