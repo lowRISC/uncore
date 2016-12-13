@@ -48,7 +48,8 @@ class L2BroadcastHub(implicit p: Parameters) extends ManagerCoherenceAgent()(p)
   trackerList.map(_.io.incoherent := io.incoherent)
 
   // Queue to store impending Put data
-  val sdq = Reg(Vec(sdqDepth, io.iacq().data))
+  val sdq_data = Reg(Vec(sdqDepth, io.iacq().data))
+  val sdq_tag = Reg(Vec(sdqDepth, io.iacq().tag))
   val sdq_val = Reg(init=Bits(0, sdqDepth))
   val sdq_alloc_id = PriorityEncoder(~sdq_val)
   val sdq_rdy = !sdq_val.andR
@@ -80,8 +81,12 @@ class L2BroadcastHub(implicit p: Parameters) extends ManagerCoherenceAgent()(p)
   val voluntary = io.irel().isVoluntary()
   val vwbdq_enq = io.inner.release.fire() && voluntary && io.irel().hasData()
   val (rel_data_cnt, rel_data_done) = Counter(vwbdq_enq, innerDataBeats) //TODO Zero width
-  val vwbdq = Reg(Vec(innerDataBeats, io.irel().data)) //TODO Assumes nReleaseTransactors == 1
-  when(vwbdq_enq) { vwbdq(rel_data_cnt) := io.irel().data }
+  val vwbdq_data = Reg(Vec(innerDataBeats, io.irel().data)) //TODO Assumes nReleaseTransactors == 1
+  val vwbdq_tag = Reg(Vec(innerDataBeats, io.irel().tag)) //TODO Assumes nReleaseTransactors == 1
+  when(vwbdq_enq) {
+    vwbdq_data(rel_data_cnt) := io.irel().data
+    vwbdq_tag(rel_data_cnt) := io.irel().tag
+  }
 
   // Handle releases, which might be voluntary and might have data
   val vwbqLoc = (0 until nTransactors).map(i =>
@@ -99,6 +104,7 @@ class L2BroadcastHub(implicit p: Parameters) extends ManagerCoherenceAgent()(p)
   // Note that we bypass the Grant data subbundles
   doOutputArbitration(io.inner.grant, trackerList.map(_.io.inner.grant))
   io.inner.grant.bits.data := io.outer.grant.bits.data
+  io.inner.grant.bits.tag := io.outer.grant.bits.tag
   io.inner.grant.bits.addr_beat := io.outer.grant.bits.addr_beat
   doOutputArbitration(io.inner.probe, trackerList.map(_.io.inner.probe))
   doInputRouting(io.inner.finish, trackerList.map(_.io.inner.finish))
@@ -115,8 +121,11 @@ class L2BroadcastHub(implicit p: Parameters) extends ManagerCoherenceAgent()(p)
                   outer_data_ptr.loc === inStoreQueue
   io.outer <> outer_arb.io.out
   io.outer.acquire.bits.data := MuxLookup(outer_data_ptr.loc, io.irel().data, Array(
-                                          inStoreQueue -> sdq(outer_data_ptr.idx),
-                                          inVolWBQueue -> vwbdq(outer_data_ptr.idx)))
+                                          inStoreQueue -> sdq_data(outer_data_ptr.idx),
+                                          inVolWBQueue -> vwbdq_data(outer_data_ptr.idx)))
+  io.outer.acquire.bits.tag := MuxLookup(outer_data_ptr.loc, io.irel().tag, Array(
+                                          inStoreQueue -> sdq_tag(outer_data_ptr.idx),
+                                          inVolWBQueue -> vwbdq_tag(outer_data_ptr.idx)))
 
   // Update SDQ valid bits
   when (io.outer.acquire.valid || sdq_enq) {
@@ -244,14 +253,16 @@ class BroadcastAcquireTracker(trackerId: Int)
     addr_block = xact.addr_block,
     addr_beat = xact.addr_beat,
     data = xact.data_buffer(0),
-    wmask = xact.wmask())(outerParams)
+    wmask = xact.wmask(),
+    tmask = xact.tmask())(outerParams)
 
   val oacq_write_block = PutBlock(
     client_xact_id = UInt(trackerId),
     addr_block = xact.addr_block,
     addr_beat = oacq_data_cnt,
     data = xact.data_buffer(oacq_data_cnt),
-    wmask = xact.wmask_buffer(oacq_data_cnt))(outerParams)
+    wmask = xact.wmask_buffer(oacq_data_cnt),
+    tmask = xact.tmask_buffer(oacq_data_cnt))(outerParams)
 
   val oacq_read_beat = Get(
     client_xact_id = UInt(trackerId),
@@ -299,6 +310,7 @@ class BroadcastAcquireTracker(trackerId: Int)
     when(io.inner.acquire.valid) {
       xact.data_buffer(io.iacq().addr_beat) := io.iacq().data
       xact.wmask_buffer(io.iacq().addr_beat) := io.iacq().wmask()
+      xact.tmask_buffer(io.iacq().addr_beat) := io.iacq().tmask()
       iacq_data_valid := iacq_data_valid.bitSet(io.iacq().addr_beat, Bool(true))
     }
     when(iacq_data_done) { collect_iacq_data := Bool(false) }
@@ -317,6 +329,7 @@ class BroadcastAcquireTracker(trackerId: Int)
         xact := io.iacq()
         xact.data_buffer(UInt(0)) := io.iacq().data
         xact.wmask_buffer(UInt(0)) := io.iacq().wmask()
+        xact.tmask_buffer(UInt(0)) := io.iacq().tmask()
         collect_iacq_data := io.iacq().hasMultibeatData()
         iacq_data_valid := io.iacq().hasData() << io.iacq().addr_beat
         val needs_probes = mask_incoherent.orR
