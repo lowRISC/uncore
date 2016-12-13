@@ -24,6 +24,7 @@ case object SplitMetadata extends Field[Boolean]
 case object RAMSize extends Field[BigInt]
 
 trait HasCacheParameters extends HasTagParameters {
+  implicit val p: Parameters
   val nSets = p(NSets)
   val blockOffBits = p(CacheBlockOffsetBits)
   val cacheIdBits = p(CacheIdBits)
@@ -1021,8 +1022,8 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
                               manager_xact_id = UInt(trackerId), 
                               data = Mux(xact.is(Acquire.putAtomicType),
                                        amo_result,
-                                       data_buffer(ignt_data_idx),
-                                       tag_buffer(ignt_data_idx)))
+                                       data_buffer(ignt_data_idx)),
+                              tag = tag_buffer(ignt_data_idx)) // not sure about this
   val grant_from_release = pending_coh.inner.makeGrant(xact_vol_irel)
   io.inner.grant.bits := Mux(pending_vol_ignt, grant_from_release, grant_from_acquire)
   io.inner.grant.bits.addr_beat := ignt_data_idx // override based on outgoing counter

@@ -23,9 +23,6 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 
   val cacheAccDelay = 2 // delay of accessing metadata or data arrays
 
-  val rowTags = rowBits / tgHelper.wordBits
-  val rowTagBits = tgBits * rowTags
-
   require(outerDataBits == rowBits)
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(outerTLId == p(TLId))
@@ -899,7 +896,8 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IREL :: ms_OACQ :: ms_IGNT :: Nil = Enum(UInt(), 4)
   val mt_state = Reg(init = ms_IDLE)
 
-  require(innerTLId == outerTLId)
+  require(inner.tlDataBits == outer.tlDataBits)
+  require(inner.tlDataBeats == outer.tlDataBeats)
   val xact = Reg(new BufferedReleaseFromSrc()(innerPM))
 
   val irel_done = connectIncomingDataBeatCounter(inner.release)
@@ -967,7 +965,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val ms_IDLE :: ms_IACQ :: ms_OACQ :: ms_OGNT :: ms_IGNT :: ms_IFIN :: Nil = Enum(UInt(), 6)
   val mt_state = Reg(init = ms_IDLE)
 
-  require(innerTLId == outerTLId)
+  require(inner.tlDataBits == outer.tlDataBits)
+  require(inner.tlDataBeats == outer.tlDataBeats)
   val xact  = Reg(new BufferedAcquireFromSrc()(innerPM))
 
   val iacq_cnt = inner.acquire.bits.addr_beat
@@ -1009,8 +1008,8 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
         addr_byte = xact.addr_byte(),
         operand_size = xact.op_size(),
         opcode = xact.op_code(),
-        wmask = xact.wmask_buffer(oacq_cnt)),
-        tmask = xact.tmask_buffer(oacq_cnt)),
+        wmask = xact.wmask_buffer(oacq_cnt),
+        tmask = xact.tmask_buffer(oacq_cnt),
         alloc = Bool(true)
       ),
       Cat(MT_Q, M_XRD, Bool(true))) // coherent Acquire must be getBlock?

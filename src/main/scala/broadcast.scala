@@ -58,7 +58,10 @@ class L2BroadcastHub(implicit p: Parameters) extends ManagerCoherenceAgent()(p)
                     t.io.inner.acquire.fire() &&
                     t.io.iacq().hasData()
                 ).reduce(_||_)
-  when (sdq_enq) { sdq(sdq_alloc_id) := io.iacq().data }
+  when (sdq_enq) {
+    sdq_data(sdq_alloc_id) := io.iacq().data
+    sdq_tag(sdq_alloc_id) := io.iacq().tag
+  }
 
   // Handle acquire transaction initiation
   val irel_vs_iacq_conflict =

@@ -44,6 +44,7 @@ case class TileLinkParameters(
   
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
 trait HasTileLinkParameters extends HasTagParameters{
+  implicit val p: Parameters
   val tlExternal = p(TLKey(p(TLId)))
   val tlCoh = tlExternal.coherencePolicy
   val tlNManagers = tlExternal.nManagers
@@ -207,7 +208,7 @@ trait HasAcquireUnion extends HasTileLinkParameters {
   } else UInt(0)
   /** Full, beat-sized writemask */
   def full_wmask(dummy: Int = 0) = FillInterleaved(8, wmask())
-  def full_tmask(dummy: Int = 0) = FillInterLeaved(tgBits, tmask())
+  def full_tmask(dummy: Int = 0) = FillInterleaved(tgBits, tmask())
 }
 
 trait HasAcquireType extends HasTileLinkParameters {
@@ -392,8 +393,8 @@ object Acquire {
       Acquire.putPrefetchType -> Cat(M_XWR, alloc)))
   }
 
-  def fullWriteMask(implicit p: Parameters) = SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits).toUInt
-  def fullTagMask(implicit p: Parameters) = if(p(UseTagMem)) SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits / 8).toUInt else SInt(0)
+  def fullWriteMask(implicit p: Parameters) = ~UInt(0, width = p(TLKey(p(TLId))).writeMaskBits)
+  def fullTagMask(implicit p: Parameters) = if(p(UseTagMem)) ~UInt(0, width = p(TLKey(p(TLId))).writeMaskBits / 8) else UInt(0)
 
   // Most generic constructor
   def apply(
@@ -596,27 +597,9 @@ object PutBlock {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
-        tag: UInt,
-        wmask: UInt,
-        tmask: UInt)
-      (implicit p: Parameters): Acquire = {
-    BuiltInAcquireBuilder(
-      a_type = Acquire.putBlockType,
-      client_xact_id = client_xact_id,
-      addr_block = addr_block,
-      addr_beat = addr_beat,
-      data = data,
-      tag = tag,
-      wmask = wmask,
-      tmask = tmask,
-      alloc = Bool(true))
-  }
-  def apply(
-        client_xact_id: UInt,
-        addr_block: UInt,
-        addr_beat: UInt,
-        data: UInt,
-        tag: UInt = UInt(0),
+        tag: Option[UInt]= None,
+        wmask: Option[UInt]= None,
+        tmask: Option[UInt]= None,
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -625,10 +608,10 @@ object PutBlock {
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
-      tag = tag,
-      wmask = Acquire.fullWriteMask,
-      tmask = Acquire.fullTagMask,
-      alloc = alloc)
+      tag = tag.getOrElse(UInt(0)),
+      wmask = wmask.getOrElse(Acquire.fullWriteMask),
+      tmask = tmask.getOrElse(Acquire.fullTagMask),
+      alloc = Bool(true))
   }
 }
 
@@ -669,7 +652,7 @@ object PutAtomic {
         atomic_opcode: UInt,
         operand_size: UInt,
         data: UInt,
-        tag: UInt = Uint(0))
+        tag: UInt = UInt(0))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
       a_type = Acquire.putAtomicType,
@@ -885,7 +868,7 @@ object Grant {
         manager_xact_id: UInt,
         addr_beat: UInt,
         data: UInt,
-        tag: UInt)
+        tag: UInt = UInt(0))
       (implicit p: Parameters): Grant = {
     val gnt = Wire(new Grant)
     gnt.is_builtin_type := is_builtin_type
@@ -897,14 +880,16 @@ object Grant {
     gnt.tag := tag
     gnt
   }
+}
 
+object GrantToDst {
   def apply(
         dst: UInt,
         is_builtin_type: Bool,
         g_type: UInt,
         client_xact_id: UInt,
         manager_xact_id: UInt,
-        addr_beat: UInt = UInt(0),
+        addr_beat:UInt = UInt(0),
         data: UInt = UInt(0),
         tag: UInt = UInt(0))
       (implicit p: Parameters): GrantToDst = {

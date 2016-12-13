@@ -226,7 +226,7 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
     * @param rel Release message being acknowledged by this Grant
     */
   def makeGrant(rel: ReleaseMetadata with HasClientId): GrantToDst =
-    Grant(
+    GrantToDst(
       dst = rel.client_id,
       is_builtin_type = Bool(true),
       g_type = Grant.voluntaryAckType,
@@ -248,7 +248,7 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
         addr_beat: UInt = UInt(0),
         data: UInt = UInt(0),
         tag: UInt = UInt(0)): GrantToDst =
-    Grant(
+    GrantToDst(
       dst = acq.client_id,
       is_builtin_type = acq.isBuiltInType(),
       g_type = co.getGrantType(acq, this),
@@ -272,7 +272,7 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
         manager_xact_id: UInt,
         data: UInt,
         tag: UInt): GrantToDst = {
-    Grant(
+    GrantToDst(
       dst = sec.client_id,
       is_builtin_type = sec.isBuiltInType(),
       g_type = co.getGrantType(sec, this),
