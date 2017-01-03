@@ -14,12 +14,16 @@ case object TagMapRatio extends Field[Int]
 abstract trait HasTagParameters {
   implicit val p: Parameters
   val tgBits = p(TagBits)                               // the number of bits in each tag
+  val tgInstBits = 2                                    // size of instruction tag
   val tgMapRatio = p(TagMapRatio)                       // the number of bits a map bit represents
   val useTagMem = p(UseTagMem)
 
   val tgHelper = new TagUtil(tgBits, tgMapRatio,
     p(RAMSize), p(GlobalAddrHashMap)("mem").start,
     p(CacheBlockBytes))                                 // tag helper functions
+
+  require(!useTagMem || ((tgBits >= tgInstBits * 2) && (tgBits % tgInstBits == 0)))
+
 }
 
 // support for tagged memory
