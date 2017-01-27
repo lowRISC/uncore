@@ -34,7 +34,6 @@ case class TileLinkParameters(
     maxManagerXacts: Int,
     dataBits: Int,
     dataBeats: Int = 4,
-    withTag: Boolean = false,
     overrideDataBitsPerBeat: Option[Int] = None
     ) {
   val nClients = nCachingClients + nCachelessClients
@@ -45,8 +44,8 @@ case class TileLinkParameters(
   
 /** Utility trait for building Modules and Bundles that use TileLink parameters */
 trait HasTileLinkParameters extends HasTagParameters{
+  implicit val p: Parameters
   val tlExternal = p(TLKey(p(TLId)))
-  val tlTagged = tlExternal.withTag
   val tlCoh = tlExternal.coherencePolicy
   val tlNManagers = tlExternal.nManagers
   val tlNCachingClients = tlExternal.nCachingClients
@@ -60,20 +59,20 @@ trait HasTileLinkParameters extends HasTagParameters{
   val tlClientXactIdBits = log2Up(tlMaxClientXacts*tlMaxClientsPerPort) + log2Up(tlNClients) // lost id in Uncached crossabr
   val tlManagerXactIdBits = log2Up(tlMaxManagerXacts)
   val tlDataBeats = tlExternal.dataBeats
-  val tlDataBits = if(tlTagged) tgHelper.sizeWithTag(tlExternal.dataBitsPerBeat)
-                   else         tlExternal.dataBitsPerBeat
-  val tlDataBytes = tlExternal.dataBitsPerBeat/8             // ATTN: bytes of data without tag
-  val tlWriteMaskBits = if(tlTagged) tgHelper.maskSizeWithTag(tlExternal.writeMaskBits)
-                        else         tlExternal.writeMaskBits
+  val tlDataBits = tlExternal.dataBitsPerBeat
+  val tlDataBytes = tlDataBits/8
+  val tlTagBits = tgHelper.tagSize(tlDataBits)
+  val tlWriteMaskBits = tlExternal.writeMaskBits
+  val tlTagMaskBits = if(useTagMem) tgHelper.tagSize(tlDataBits) else 0
   val tlBeatAddrBits = log2Up(tlDataBeats)
-  val tlByteAddrBits = log2Up(tlExternal.writeMaskBits)
+  val tlByteAddrBits = log2Up(tlWriteMaskBits)
   val tlBlockOffsetBits = tlByteAddrBits + (if (tlDataBeats > 1) tlBeatAddrBits else 0)
   val tlBlockAddrBits = p(PAddrBits) - tlBlockOffsetBits
   val tlMemoryOpcodeBits = M_SZ
   val tlMemoryOperandSizeBits = MT_SZ
   val tlAcquireTypeBits = max(log2Up(Acquire.nBuiltInTypes), 
                               tlCoh.acquireTypeWidth)
-  val tlAcquireUnionBits = max(tlWriteMaskBits,
+  val tlAcquireUnionBits = max(tlWriteMaskBits + tlTagMaskBits,
                                  (tlByteAddrBits +
                                    tlMemoryOperandSizeBits +
                                    tlMemoryOpcodeBits)) + 1
@@ -140,6 +139,7 @@ trait HasManagerTransactionId extends HasTileLinkParameters {
 /** A single beat of cache block data */
 trait HasTileLinkData extends HasTileLinkBeatId {
   val data = UInt(width = tlDataBits)
+  val tag = UInt(width = tlTagBits)
 
   def hasData(dummy: Int = 0): Bool
   def hasMultibeatData(dummy: Int = 0): Bool
@@ -150,7 +150,9 @@ trait HasTileLinkData extends HasTileLinkBeatId {
 /** An entire cache block of data */
 trait HasTileLinkBlock extends HasTileLinkParameters {
   val data_buffer = Vec(tlDataBeats, UInt(width = tlDataBits))
+  val tag_buffer = Vec(tlDataBeats, UInt(width = tlTagBits))
   val wmask_buffer = Vec(tlDataBeats, UInt(width = tlWriteMaskBits))
+  val tmask_buffer = Vec(tlDataBeats, UInt(width = if(useTagMem) tlTagMaskBits else 1))
 }
 
 /** The id of a client source or destination. Used in managers. */
@@ -198,8 +200,15 @@ trait HasAcquireUnion extends HasTileLinkParameters {
         union(tlWriteMaskBits, 1),
         UInt(0, width = tlWriteMaskBits)))
   }
+  /** Tag write mask for [[uncore.Put]], [[uncore.PutBlock]], [[uncore.PutAtomic]] */
+  def tmask(dummy: Int = 0): UInt = if (useTagMem) {
+    Mux(isBuiltInType(Acquire.putBlockType) || isBuiltInType(Acquire.putType),
+      union(tlTagMaskBits+tlWriteMaskBits, tlWriteMaskBits+1),
+      UInt(0, width = tlWriteMaskBits))
+  } else UInt(0)
   /** Full, beat-sized writemask */
   def full_wmask(dummy: Int = 0) = FillInterleaved(8, wmask())
+  def full_tmask(dummy: Int = 0) = FillInterleaved(tgBits, tmask())
 }
 
 trait HasAcquireType extends HasTileLinkParameters {
@@ -372,18 +381,20 @@ object Acquire {
         operand_size: UInt,
         opcode: UInt,
         wmask: UInt,
+        tmask: UInt,
         alloc: Bool): UInt = {
     MuxLookup(a_type, UInt(0), Array(
       Acquire.getType       -> Cat(addr_byte, operand_size, opcode, alloc),
       Acquire.getBlockType  -> Cat(operand_size, opcode, alloc),
-      Acquire.putType       -> Cat(wmask, alloc),
-      Acquire.putBlockType  -> Cat(wmask, alloc),
+      Acquire.putType       -> Cat(tmask, wmask, alloc),
+      Acquire.putBlockType  -> Cat(tmask, wmask, alloc),
       Acquire.putAtomicType -> Cat(addr_byte, operand_size, opcode, alloc),
       Acquire.getPrefetchType -> Cat(M_XRD, alloc),
       Acquire.putPrefetchType -> Cat(M_XWR, alloc)))
   }
 
-  def fullWriteMask(implicit p: Parameters) = SInt(-1, width = p(TLKey(p(TLId))).writeMaskBits).toUInt
+  def fullWriteMask(implicit p: Parameters) = ~UInt(0, width = p(TLKey(p(TLId))).writeMaskBits)
+  def fullTagMask(implicit p: Parameters) = if(p(UseTagMem)) ~UInt(0, width = p(TLKey(p(TLId))).writeMaskBits / 8) else UInt(0)
 
   // Most generic constructor
   def apply(
@@ -393,6 +404,7 @@ object Acquire {
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
         data: UInt = UInt(0),
+        tag: UInt = UInt(0),
         union: UInt = UInt(0))
       (implicit p: Parameters): Acquire = {
     val acq = Wire(new Acquire)
@@ -402,6 +414,7 @@ object Acquire {
     acq.addr_block := addr_block
     acq.addr_beat := addr_beat
     acq.data := data
+    acq.tag := tag
     acq.union := union
     acq
   }
@@ -421,10 +434,12 @@ object BuiltInAcquireBuilder {
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
         data: UInt = UInt(0),
+        tag: UInt = UInt(0),
         addr_byte: UInt = UInt(0),
         operand_size: UInt = MT_Q,
         opcode: UInt = UInt(0),
         wmask: UInt = UInt(0),
+        tmask: UInt = UInt(0),
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     Acquire(
@@ -434,7 +449,8 @@ object BuiltInAcquireBuilder {
         addr_block = addr_block,
         addr_beat = addr_beat,
         data = data,
-        union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, alloc))
+        tag = tag,
+        union = Acquire.makeUnion(a_type, addr_byte, operand_size, opcode, wmask, tmask, alloc))
   }
 }
 
@@ -544,7 +560,9 @@ object Put {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
+        tag: Option[UInt]= None,
         wmask: Option[UInt]= None,
+        tmask: Option[UInt]= None,
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -553,7 +571,9 @@ object Put {
       addr_beat = addr_beat,
       client_xact_id = client_xact_id,
       data = data,
+      tag = tag.getOrElse(UInt(0)),
       wmask = wmask.getOrElse(Acquire.fullWriteMask),
+      tmask = tmask.getOrElse(Acquire.fullTagMask),
       alloc = alloc)
   }
 }
@@ -577,22 +597,9 @@ object PutBlock {
         addr_block: UInt,
         addr_beat: UInt,
         data: UInt,
-        wmask: UInt)
-      (implicit p: Parameters): Acquire = {
-    BuiltInAcquireBuilder(
-      a_type = Acquire.putBlockType,
-      client_xact_id = client_xact_id,
-      addr_block = addr_block,
-      addr_beat = addr_beat,
-      data = data,
-      wmask = wmask,
-      alloc = Bool(true))
-  }
-  def apply(
-        client_xact_id: UInt,
-        addr_block: UInt,
-        addr_beat: UInt,
-        data: UInt,
+        tag: Option[UInt]= None,
+        wmask: Option[UInt]= None,
+        tmask: Option[UInt]= None,
         alloc: Bool = Bool(true))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
@@ -601,8 +608,10 @@ object PutBlock {
       addr_block = addr_block,
       addr_beat = addr_beat,
       data = data,
-      wmask = Acquire.fullWriteMask,
-      alloc = alloc)
+      tag = tag.getOrElse(UInt(0)),
+      wmask = wmask.getOrElse(Acquire.fullWriteMask),
+      tmask = tmask.getOrElse(Acquire.fullTagMask),
+      alloc = Bool(true))
   }
 }
 
@@ -642,7 +651,8 @@ object PutAtomic {
         addr_byte: UInt,
         atomic_opcode: UInt,
         operand_size: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt = UInt(0))
       (implicit p: Parameters): Acquire = {
     BuiltInAcquireBuilder(
       a_type = Acquire.putAtomicType,
@@ -650,6 +660,7 @@ object PutAtomic {
       addr_block = addr_block, 
       addr_beat = addr_beat, 
       data = data,
+      tag = tag,
       addr_byte = addr_byte,
       operand_size = operand_size,
       opcode = atomic_opcode)
@@ -743,7 +754,8 @@ object Release {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt)
       (implicit p: Parameters): Release = {
     val rel = Wire(new Release)
     rel.r_type := r_type
@@ -751,6 +763,7 @@ object Release {
     rel.addr_block := addr_block
     rel.addr_beat := addr_beat
     rel.data := data
+    rel.tag := tag
     rel.voluntary := voluntary
     rel
   }
@@ -762,7 +775,8 @@ object Release {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0))
+        data: UInt = UInt(0),
+        tag: UInt =UInt(0))
       (implicit p: Parameters): ReleaseFromSrc = {
     val rel = Wire(new ReleaseFromSrc)
     rel.client_id := src
@@ -772,6 +786,7 @@ object Release {
     rel.addr_block := addr_block
     rel.addr_beat := addr_beat
     rel.data := data
+    rel.tag := tag
     rel
   }
 }
@@ -852,7 +867,8 @@ object Grant {
         client_xact_id: UInt, 
         manager_xact_id: UInt,
         addr_beat: UInt,
-        data: UInt)
+        data: UInt,
+        tag: UInt = UInt(0))
       (implicit p: Parameters): Grant = {
     val gnt = Wire(new Grant)
     gnt.is_builtin_type := is_builtin_type
@@ -861,17 +877,21 @@ object Grant {
     gnt.manager_xact_id := manager_xact_id
     gnt.addr_beat := addr_beat
     gnt.data := data
+    gnt.tag := tag
     gnt
   }
+}
 
+object GrantToDst {
   def apply(
         dst: UInt,
         is_builtin_type: Bool,
         g_type: UInt,
         client_xact_id: UInt,
         manager_xact_id: UInt,
-        addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0))
+        addr_beat:UInt = UInt(0),
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0))
       (implicit p: Parameters): GrantToDst = {
     val gnt = Wire(new GrantToDst)
     gnt.client_id := dst
@@ -881,6 +901,7 @@ object Grant {
     gnt.manager_xact_id := manager_xact_id
     gnt.addr_beat := addr_beat
     gnt.data := data
+    gnt.tag := tag
     gnt
   }
 }

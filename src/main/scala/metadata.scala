@@ -67,14 +67,16 @@ class ClientMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0)): Release =
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0)): Release =
     Release(
       voluntary = Bool(true),
       r_type = co.getReleaseType(op_code, this),
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
-      data = data)(p)
+      data = data,
+      tag = tag)(p)
 
   /** Constructs a Release message based on this metadata on an eviction
     *
@@ -87,13 +89,15 @@ class ClientMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
         client_xact_id: UInt,
         addr_block: UInt,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0)): Release =
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0)): Release =
     makeVoluntaryRelease(
       op_code = M_FLUSH,
       client_xact_id = client_xact_id,
       addr_block = addr_block,
       addr_beat = addr_beat,
-      data = data)
+      data = data,
+      tag = tag)
 
   /** Constructs a Release message based on this metadata and a [[uncore.Probe]]
     *
@@ -104,14 +108,16 @@ class ClientMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
   def makeRelease(
         prb: Probe,
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0)): Release =
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0)): Release =
     Release(
       voluntary = Bool(false),
       r_type = co.getReleaseType(prb, this),
       client_xact_id = UInt(0),
       addr_block = prb.addr_block,
       addr_beat = addr_beat,
-      data = data)(p)
+      data = data,
+      tag = tag)(p)
 
   /** New metadata after receiving a [[uncore.Grant]]
     *
@@ -220,7 +226,7 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
     * @param rel Release message being acknowledged by this Grant
     */
   def makeGrant(rel: ReleaseMetadata with HasClientId): GrantToDst =
-    Grant(
+    GrantToDst(
       dst = rel.client_id,
       is_builtin_type = Bool(true),
       g_type = Grant.voluntaryAckType,
@@ -240,15 +246,17 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
         acq: AcquireMetadata with HasClientId,
         manager_xact_id: UInt, 
         addr_beat: UInt = UInt(0),
-        data: UInt = UInt(0)): GrantToDst =
-    Grant(
+        data: UInt = UInt(0),
+        tag: UInt = UInt(0)): GrantToDst =
+    GrantToDst(
       dst = acq.client_id,
       is_builtin_type = acq.isBuiltInType(),
       g_type = co.getGrantType(acq, this),
       client_xact_id = acq.client_xact_id,
       manager_xact_id = manager_xact_id,
       addr_beat = addr_beat,
-      data = data)(p)
+      data = data,
+      tag = tag)(p)
 
   /** Construct an [[uncore.GrantToDst]] to respond to an [[uncore.Acquire]] with some overrides
     *
@@ -262,15 +270,17 @@ class ManagerMetadata(implicit p: Parameters) extends CoherenceMetadata()(p) {
   def makeGrant(
         sec: SecondaryMissInfo,
         manager_xact_id: UInt,
-        data: UInt): GrantToDst = {
-    Grant(
+        data: UInt,
+        tag: UInt): GrantToDst = {
+    GrantToDst(
       dst = sec.client_id,
       is_builtin_type = sec.isBuiltInType(),
       g_type = co.getGrantType(sec, this),
       client_xact_id = sec.client_xact_id,
       manager_xact_id = manager_xact_id,
       addr_beat = sec.addr_beat,
-      data = data)(p)
+      data = data,
+      tag = tag)(p)
   }
     
   /** New metadata after receiving a [[uncore.ReleaseFromSrc]]
