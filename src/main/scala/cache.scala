@@ -772,7 +772,7 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
     when(xact.is(Acquire.putAtomicType) && xact.addr_beat === beat) { amo_result := old_data }
     val old_tag = incoming_tag
     val new_tag = tag_buffer(beat)
-    val tmask = FillInterleaved(tgBits, tmask_buffer(beat))
+    val tmask = if (useTagMem) FillInterleaved(tgBits, tmask_buffer(beat)) else UInt(0)
     tag_buffer(beat) := ~tmask & old_tag | tmask & new_tag
   }
 
