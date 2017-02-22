@@ -388,7 +388,7 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
   acqRoq.io.deq.valid := acqRoq.io.deq.matches && grant_deq_roq
   acqRoq.io.deq.tag := ognt.client_xact_id
 
-  relRoq.io.deq.valid := relRoq.io.deq.matches && grant_deq_roq
+  relRoq.io.deq.valid := !acqRoq.io.deq.matches && grant_deq_roq
   relRoq.io.deq.tag := ognt.client_xact_id
 
   assert(!grant_deq_roq || acqRoq.io.deq.matches || relRoq.io.deq.matches,
@@ -405,9 +405,10 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
     addr_beat = ognt.addr_beat,
     data = ognt.data)
 
+  assert(!io.in.release.valid || io.in.release.bits.isVoluntary(), "Unwrapper can only process voluntary releases.")
   val rel_grant = Grant(
     is_builtin_type = Bool(true),
-    g_type = Mux(gnt_voluntary, Grant.voluntaryAckType, ognt.g_type),
+    g_type = Grant.voluntaryAckType, // We should only every be working with voluntary releases
     client_xact_id = ognt.client_xact_id,
     manager_xact_id = ognt.manager_xact_id,
     addr_beat = ognt.addr_beat,
@@ -418,6 +419,7 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
   io.out.grant.ready := io.in.grant.ready
 
   io.in.probe.valid := Bool(false)
+  io.in.finish.ready := Bool(false)
 }
 
 class NastiIOTileLinkIOConverterInfo(implicit p: Parameters) extends TLBundle()(p) {
