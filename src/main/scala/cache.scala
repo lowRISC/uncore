@@ -376,7 +376,7 @@ class L2DataArray(delay: Int)(implicit p: Parameters) extends L2HellaCacheModule
 
   if(useTagMem) {
     val tag_array = SeqMem(nWays*nSets*refillCycles, Vec(rowTags, Bits(width=tgBits)))
-    val tdata = Vec.tabulate(rowTags)(i => io.write.bits.data(tgBits*(i+1)-1,tgBits*i))
+    val tdata = Vec.tabulate(rowTags)(i => io.write.bits.tag(tgBits*(i+1)-1,tgBits*i))
     val tmask = io.write.bits.tmask.toBools
     when (io.write.valid) { tag_array.write(waddr, tdata, tmask) }
     io.resp.bits.tag := Pipe(r_req.valid, tag_array.read(raddr, ren).toBits, delay).bits
