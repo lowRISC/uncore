@@ -364,6 +364,7 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
     addr_block = iacq.addr_block,
     addr_beat = iacq.addr_beat,
     data = iacq.data,
+    tag  = iacq.tag,
     union = Mux(iacq.isBuiltInType(),
       iacq.union, Cat(MT_Q, M_XRD, Bool(true))))
   io.in.acquire.ready := acq_helper.fire(io.in.acquire.valid)
@@ -378,7 +379,9 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
     addr_block = irel.addr_block,
     addr_beat = irel.addr_beat,
     data = irel.data,
-    wmask = Acquire.fullWriteMask)
+    tag  = irel.tag,
+    wmask = Acquire.fullWriteMask,
+    tmask = Acquire.fullTagMask)
   io.in.release.ready := rel_helper.fire(io.in.release.valid)
 
   io.out.acquire <> acqArb.io.out
@@ -403,7 +406,8 @@ class ClientTileLinkIOUnwrapper(implicit p: Parameters) extends TLModule()(p) {
     client_xact_id = ognt.client_xact_id,
     manager_xact_id = ognt.manager_xact_id,
     addr_beat = ognt.addr_beat,
-    data = ognt.data)
+    data = ognt.data,
+    tag = ognt.tag)
 
   assert(!io.in.release.valid || io.in.release.bits.isVoluntary(), "Unwrapper can only process voluntary releases.")
   val rel_grant = Grant(
