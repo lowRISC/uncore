@@ -415,7 +415,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.wb.req.bits.idx := idx
   io.wb.req.bits.way_en := way_en
   io.wb.req.bits.tag := wb_tag
-  io.wb.req.bits.empty := wb_empty
+  io.wb.req.bits.empty := wb_empty && !tgHelper.is_top(xact.addr)
   io.wb.req.valid := state === s_D_FWB_RESP && !writeback_sent
 
   when(state === s_D_FWB_REQ) {

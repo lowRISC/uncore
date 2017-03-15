@@ -71,6 +71,6 @@ class TagUtil(
   def pa2tm1a(addr: UInt): UInt = ((addr - UInt(memBase)) >> (unTagBits + unMapBits + unMapBits)) + UInt(map1Base)
   def pa2tm1b(addr: UInt, rbo: Int): UInt = addr(unTagBits + unMapBits + unMapBits + rbo - 1, unTagBits + unMapBits + unMapBits - 3)
 
-  // check whether this is top-map line
-  def is_top(addr: UInt): Bool = (addr >> blockOffBits) >= UInt(map1Base >> blockOffBits)
+  // now need to enforce writeback of tm1 and tm0
+  def is_top(addr: UInt): Bool = (addr >> blockOffBits) >= UInt(map0Base >> blockOffBits)
 }
