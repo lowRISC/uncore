@@ -1154,7 +1154,8 @@ class TileLinkIOMamIOConverter(implicit p: Parameters) extends TLModule()(p)
   val tl_beat_byte_count = Mux(reqSerDes.io.tl_block, UInt(tlDataBytes), reqSerDes.io.tl_count)
 
   val mam_data_buffer =
-    Module(new SerDesBuffer(8, cacheBlockBytes, mamBytes, tlDataBytes))
+    Module(new SerDesBuffer(8, tlDataBytes+mamBytes, mamBytes, tlDataBytes))
+//    Module(new SerDesBuffer(8, cacheBlockBytes, mamBytes, tlDataBytes))
   val mam_data_buffer_in_data = Wire(Vec(mamBytes, UInt(width=8)))
   mam_data_buffer.io.in.valid := io.mam.wdata.valid
   mam_data_buffer.io.out.ready := io.tl.acquire.fire()
@@ -1162,7 +1163,8 @@ class TileLinkIOMamIOConverter(implicit p: Parameters) extends TLModule()(p)
   mam_data_buffer.io.out_size := tl_beat_byte_count
 
   val mam_mask_buffer =
-    Module(new SerDesBuffer(1, cacheBlockBytes, mamBytes, tlDataBytes))
+    Module(new SerDesBuffer(1, tlDataBytes+mamBytes, mamBytes, tlDataBytes))
+//    Module(new SerDesBuffer(1, cacheBlockBytes, mamBytes, tlDataBytes))
   val mam_mask_buffer_in_data = Wire(Vec(mamBytes, Bool()))
   mam_mask_buffer.io.in.valid := io.mam.wdata.valid
   mam_mask_buffer.io.out.ready := io.tl.acquire.fire()
@@ -1170,7 +1172,8 @@ class TileLinkIOMamIOConverter(implicit p: Parameters) extends TLModule()(p)
   mam_mask_buffer.io.out_size := tl_beat_byte_count
 
   val tl_data_buffer =
-    Module(new SerDesBuffer(8, cacheBlockBytes, tlDataBytes, mamBytes))
+    Module(new SerDesBuffer(8, tlDataBytes+tlDataBytes, tlDataBytes, mamBytes))
+//    Module(new SerDesBuffer(8, cacheBlockBytes, tlDataBytes, mamBytes))
   val tl_data_buffer_in_data = Wire(Vec(tlDataBytes, UInt(width=8)))
   tl_data_buffer.io.in.valid := !reqSerDes.io.tl_rw && io.tl.grant.valid
   tl_data_buffer.io.out.ready := io.mam.rdata.ready
@@ -1306,7 +1309,8 @@ class MamReqSerDes(implicit p: Parameters) extends TLModule()(p)
   }
 
   io.tl_rw := req.rw
-  io.tl_block := byte_cnt >= UInt(cacheBytes) && req.addr(tlBeatAddrBits+tlByteAddrBits-1,0) === UInt(0)
+  // disable block transaction to reduce area
+  io.tl_block := Bool(false) // byte_cnt >= UInt(cacheBytes) && req.addr(tlBeatAddrBits+tlByteAddrBits-1,0) === UInt(0)
   io.tl_addr := Cat(req.addr >> tlByteAddrBits, UInt(0, width=tlByteAddrBits))
   io.tl_shift := req.addr(tlByteAddrBits-1,0)
   io.tl_count := Mux(io.tl_block, UInt(cacheBytes), // a whole cache line
