@@ -280,10 +280,32 @@ class BroadcastAcquireTracker(trackerId: Int)
     addr_block = xact.addr_block)(outerParams)
 
   io.outer.acquire.valid := Bool(false)
-  io.outer.acquire.bits := Mux(state === s_probe, oacq_probe,
-    Mux(state === s_mem_write,
-      Mux(subblock_type, oacq_write_beat, oacq_write_block),
-      Mux(subblock_type, oacq_read_beat, oacq_read_block)))
+
+// Something is SERIOUSLY WRONG this version of Chisel.
+// The following code emits WRONG verilog.
+
+//  io.outer.acquire.bits := Mux(state === s_probe, oacq_probe,
+//    Mux(state === s_mem_write,
+//      Mux(subblock_type, oacq_write_beat, oacq_write_block),
+//      Mux(subblock_type, oacq_read_beat, oacq_read_block)))
+
+  io.outer.acquire.bits := oacq_probe
+  when(state === s_probe) {
+    io.outer.acquire.bits := oacq_probe
+  }
+  when(state === s_mem_write && subblock_type) {
+    io.outer.acquire.bits := oacq_write_beat
+  }
+  when(state === s_mem_write && !subblock_type) {
+    io.outer.acquire.bits := oacq_write_block
+  }
+  when(state === s_mem_read && subblock_type) {
+    io.outer.acquire.bits := oacq_read_beat
+  }
+  when(state === s_mem_read && !subblock_type) {
+    io.outer.acquire.bits := oacq_read_block
+  }
+
   io.outer.grant.ready := Bool(false)
 
   io.inner.probe.valid := Bool(false)
