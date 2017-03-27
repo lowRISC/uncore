@@ -981,6 +981,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     (0 until refillCycles).foreach( i => {
       xact.wmask_buffer(i) := UInt(0)
       xact.tmask_buffer(i) := UInt(0)
+      xact.tag_buffer(i) := UInt(0)    // always assume mem_data is initially 0 when checking tag update
     })
   }
 
