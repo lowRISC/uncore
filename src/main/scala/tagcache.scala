@@ -970,11 +970,13 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val xact  = Reg(new BufferedAcquireFromSrc()(innerPM))
 
   val iacq_cnt = inner.acquire.bits.addr_beat
+  val iacq_cnt_reg = RegEnable(iacq_cnt, inner.acquire.fire())
   val iacq_done = connectIncomingDataBeatCounter(inner.acquire)
-  val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant)
-  val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
   val ognt_cnt = outer.grant.bits.addr_beat
+  val ognt_cnt_reg = RegEnable(ognt_cnt, outer.grant.fire())
   val ognt_done = connectIncomingDataBeatCounter(outer.grant)
+  val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant, ognt_cnt_reg)
+  val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire, iacq_cnt_reg)
 
   // inner acquire
   when(mt_state === ms_IDLE) {
