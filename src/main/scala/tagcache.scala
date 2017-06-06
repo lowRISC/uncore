@@ -7,7 +7,6 @@ import junctions._
 
 case object TCMemTransactors extends Field[Int]
 case object TCTagTransactors extends Field[Int]
-case object TCEarlyAck extends Field[Boolean]
 
 trait HasTCParameters extends HasCoherenceAgentParameters
     with HasCacheParameters with HasTagParameters
@@ -21,8 +20,6 @@ trait HasTCParameters extends HasCoherenceAgentParameters
 
   val refillCycles = outerDataBeats
 
-  val cacheAccDelay = 2 // delay of accessing metadata or data arrays
-
   require(outerDataBits == rowBits)
   require(p(CacheBlockBytes) * tgBits / 8 <= rowBits) // limit the data size of tag operation to a row
   require(outerTLId == p(TLId))
@@ -34,42 +31,43 @@ abstract class TCBundle(implicit val p: Parameters) extends ParameterizedBundle(
 trait HasTCId extends HasTCParameters {
   val id = UInt(width = log2Up(nMemTransactors + nTagTransactors + 1))
 }
-trait HasTCTagFlag   extends HasTCParameters { val tagFlag = Bool() }
-trait HasTCTag       extends HasTCParameters { val tag = UInt(width = tagBits) }
-trait HasTCHit       extends HasTCParameters { val hit = Bool() }
+trait HasTCTagFlag   extends HasTCParameters { val tcnt = UInt(width = log2Up(outerDataBeats+1)) }   // counting the rows with tags
+trait HasTCTag       extends HasTCParameters { val tag  = UInt(width = tagBits) }
+trait HasTCHit       extends HasTCParameters { val hit  = Bool() }
 
 class TCIncoherence(implicit p: Parameters) extends CoherenceMetadata()(p)
-class TCMetadata(implicit p: Parameters) extends Metadata()(p) with HasTCParameters
+class TCMetadata(implicit p: Parameters) extends Metadata()(p) with HasTCParameters with HasTCTagFlag
 {
   val coh = new TCIncoherence
   val state = UInt(width=2) // MSI (0=invalid, 1=clean, 3=dirty)
-  val tagFlag = Bool()
   def isValid(dummy:Int=0) = state =/= TCMetadata.Invalid
   override def cloneType = new TCMetadata().asInstanceOf[this.type]
 }
 
 object TCMetadata {
-  def apply(tag:UInt, tagFlag:Bool, state: UInt)(implicit p: Parameters) = {
+  def apply(tag:UInt, tcnt:UInt, state: UInt)(implicit p: Parameters) = {
     val meta = Wire(new TCMetadata)
     meta.tag := tag
     meta.state := state
-    meta.tagFlag := tagFlag
+    meta.tcnt := tcnt
     meta
   }
   def Invalid = UInt("b00")
   def Clean = UInt("b01")
   def Dirty = UInt("b11")
-  def onReset(implicit p: Parameters) = TCMetadata(UInt(0), Bool(false), UInt(0))(p)
+  def onReset(implicit p: Parameters) = TCMetadata(UInt(0), UInt(0), UInt(0))(p)
 }
 
 class TCMetaReadReq(implicit p: Parameters) extends MetaReadReq()(p) with HasTCTag with HasTCId
 class TCMetaWriteReq(implicit p: Parameters) extends MetaWriteReq[TCMetadata](new TCMetadata)(p)
-class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCHit {
+class TCMetaReadResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCHit
+{
   val meta = new TCMetadata
   val way_en = UInt(width = nWays)
 }
 
-class TCMetaIO(implicit p: Parameters) extends TCBundle()(p) {
+class TCMetaIO(implicit p: Parameters) extends TCBundle()(p)
+{
   val read = Decoupled(new TCMetaReadReq)
   val write = Decoupled(new TCMetaWriteReq)
   val resp = Valid(new TCMetaReadResp).flip
@@ -82,7 +80,8 @@ trait HasTCByteMask extends HasTCParameters { val mask = UInt(width = rowBytes) 
 trait HasTCBitMask extends HasTCParameters { val mask = UInt(width = rowBits) }
 trait HasTCAddr extends HasTCParameters { val addr = UInt(width=p(PAddrBits)) }
 
-class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCRow {
+class TCDataReadReq(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCRow
+{
   val idx = Bits(width = idxBits)
   val way_en = Bits(width = nWays)
 }
@@ -97,24 +96,19 @@ class TCDataIO(implicit p: Parameters) extends TCBundle()(p) {
   override def cloneType = new TCDataIO().asInstanceOf[this.type]
 }
 
-class TCWBReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCTag {
-  val empty = Bool() // identify empty line
-}
-class TCWBResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId
-
-class TCWBIO(implicit p: Parameters) extends TCBundle()(p) {
-  val req = Decoupled(new TCWBReq)
-  val resp = Valid(new TCWBResp).flip
-}
+class TCWBReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCTag
 
 object TCTagOp {
-  def nBits           = 3
-  def Read            = UInt("b001")
-  def FetchRead       = UInt("b101")
-  def Write           = UInt("b010")
-  def Create          = UInt("b110")
-  def isRead(t:UInt)  = t(0)
-  def isWrite(t:UInt) = t(1)
+  def nBits = 3
+  def R     = UInt("b000") // read if hit
+  def F     = UInt("b001") // force a read and fetch if miss
+  def FL    = UInt("b011") // force a read and lock it
+  def W     = UInt("b100") // write a line
+  def C     = UInt("b101") // create an empty line
+  def CL    = UInt("b111") // create an empty line and lock it
+  def I     = UInt("b110") // invalidate a line
+  def isWrite(t:UInt) =  t(2)
+  def isLock(t:Uint) = t(2) && t(1)
 }
 
 class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
@@ -124,9 +118,7 @@ class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
 }
 
 class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId
-    with HasTCHit with HasTCData with HasTCTagFlag {
-  val tagUpdate = Bool() // identify whether tagFlag is changed
-}
+    with HasTCHit with HasTCData with HasTCTagFlag
 
 class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
   val req = Decoupled(new TCTagRequest)
@@ -197,7 +189,7 @@ class TCDataArray(implicit p: Parameters) extends TCModule()(p) {
 
 class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) with HasTileLinkParameters {
   val io = new Bundle {
-    val xact = new TCWBIO().flip
+    val req  = Decoupled(new TCWBReq).flip
     val data = new TCDataIO
     val tl   = new ClientUncachedTileLinkIO()
     val wb_addr = UInt(OUTPUT, width=tlBlockAddrBits)
@@ -210,7 +202,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   // read           read non-empty line from data array
   // write          write line to memory
 
-  val s_IDLE :: s_CHECK :: s_READ :: s_READ_DONE :: s_WRITE :: s_GNT :: Nil = Enum(UInt(), 6)
+  val s_IDLE :: s_READ :: s_READ_DONE :: s_WRITE :: s_GNT :: Nil = Enum(UInt(), 6)
   val state = Reg(init = s_IDLE)
 
   val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
@@ -218,28 +210,9 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   val (write_cnt, write_done) = Counter(io.data.resp.valid, refillCycles)
   val (tl_cnt, tl_done) = Counter(state === s_WRITE && io.tl.acquire.fire(), outerDataBeats)
 
-  val xact = RegEnable(io.xact.req.bits, io.xact.req.fire())
+  val xact = io.req.bits
 
-  // a scoreboard to record the replaced empty blocks
-  io.wb_addr := Cat(xact.tag, xact.idx)
-  val scoreboard_addr = Reg(init=Vec.fill(nTagTransactors)(UInt(0,tlBlockAddrBits)))
-  val scoreboard_stat = Reg(init=Vec.fill(nTagTransactors)(UInt(0,nMemTransactors)))
-  val scoreboard_ready = Vec(scoreboard_stat.map(_ === UInt(0)))
-  val scoreboard_index = PriorityEncoder(scoreboard_ready)
-  val scoreboard_match_wb = scoreboard_addr.map(state === s_READ && read_done && _ === io.wb_addr)
-  scoreboard_stat.zip(scoreboard_match_wb).foreach{ case(s,m) =>
-    s := Mux(m, UInt(0), s & io.mtActive)
-  }
-  io.addr_match.zipWithIndex.foreach{ case(m,i) => {
-    m := scoreboard_addr.zip(scoreboard_ready).map{
-      case (a, r) => !r && a === io.addr_block(i)
-    }.reduce(_||_)
-  }}
-
-  io.xact.req.ready := state === s_IDLE
-
-  io.xact.resp.bits.id := xact.id
-  io.xact.resp.valid := Bool(false)
+  io.req.ready := tl_done
 
   io.data.read.valid := state === s_READ
   io.data.read.bits := xact
@@ -248,7 +221,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 
   io.data.write.valid := Bool(false)
 
-  when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
+  when(state === s_IDLE) {
     data_buffer := Vec.fill(refillCycles)(UInt(0, rowBits))
   }
   when(io.data.resp.valid) {
@@ -267,27 +240,11 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
 
   io.tl.grant.ready := state === s_GNT
 
-  when(state === s_IDLE && io.xact.req.valid) {
-    state := Mux(io.xact.req.bits.empty, s_CHECK, s_READ)
-  }
-  when(state === s_CHECK) {
-    io.xact.resp.valid := Bool(true)
-    when(scoreboard_ready.toBits.orR) {
-      scoreboard_stat(scoreboard_index) := io.mtActive
-      scoreboard_addr(scoreboard_index) := tl_addr >> tlBlockOffsetBits
-      state := s_IDLE
-    }.otherwise{
-      state := s_WRITE
-    }
+  when(state === s_IDLE && io.req.valid) {
+    state := s_READ
   }
   when(state === s_READ && read_done) {
-    io.xact.resp.valid := Bool(true)
-    // check whether data is available in time considering the accessing delay
-    if(outerDataBeats >= cacheAccDelay) {
-      state := s_WRITE
-    } else {
-      state := s_READ_DONE
-    }
+    state := s_READ_DONE
   }
   when(state === s_READ_DONE && write_done) {
     state := s_WRITE
@@ -297,14 +254,6 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   }
   when(state === s_GNT && io.tl.grant.valid) {
     state := s_IDLE
-  }
-
-  when(state === s_CHECK && !scoreboard_ready.toBits.orR) {
-    printf("Enforced writeback zero block 0x%x due to full scoreboard.\n", io.wb_addr << blockOffBits)
-  }
-
-  when(io.xact.resp.valid) {
-    printf("Writeback %d 0x%x\n", (state === s_CHECK && !scoreboard_ready.toBits.orR) || state === s_READ, Cat(xact.tag, xact.idx) << blockOffBits)
   }
 
 }
