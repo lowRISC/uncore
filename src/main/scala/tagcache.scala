@@ -101,6 +101,7 @@ class TCWBReq(implicit p: Parameters) extends TCDataReadReq()(p) with HasTCTag
 object TCTagOp {
   def nBits = 3
   def R     = UInt("b000") // read if hit
+  def U     = UInt("b010") // unlock the line
   def F     = UInt("b001") // force a read and fetch if miss
   def FL    = UInt("b011") // force a read and lock it
   def W     = UInt("b100") // write a line
@@ -108,7 +109,8 @@ object TCTagOp {
   def CL    = UInt("b111") // create an empty line and lock it
   def I     = UInt("b110") // invalidate a line
   def isWrite(t:UInt) =  t(2)
-  def isLock(t:Uint) = t(2) && t(1)
+  def isCreate(t:UInt) = t(2) && t(0)
+  def isLock(t:Uint) = t(1) && t(0)
 }
 
 class TCTagRequest(implicit p: Parameters) extends TCBundle()(p)
@@ -121,9 +123,11 @@ class TCTagResp(implicit p: Parameters) extends TCBundle()(p) with HasTCId
     with HasTCHit with HasTCData with HasTCTagFlag
 
 class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
-  val req = Decoupled(new TCTagRequest)
+  val req = Valid(new TCTagRequest)
   val resp = Valid(new TCTagResp).flip
 }
+
+class TCTagLock(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCAddr
 
 ////////////////////////////////////////////////////////////////
 // tag cache metadata array
@@ -202,7 +206,7 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
   // read           read non-empty line from data array
   // write          write line to memory
 
-  val s_IDLE :: s_READ :: s_READ_DONE :: s_WRITE :: s_GNT :: Nil = Enum(UInt(), 6)
+  val s_IDLE :: s_READ :: s_READ_DONE :: s_WRITE :: s_GNT :: Nil = Enum(UInt(), 5)
   val state = Reg(init = s_IDLE)
 
   val data_buffer = Reg(init=Vec.fill(refillCycles)(UInt(0, rowBits)))
@@ -266,307 +270,216 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     val xact = new TCTagXactIO().flip
     val meta = new TCMetaIO
     val data = new TCDataIO
-    val wb   = new TCWBIO
+    val wb   = Decoupled(new TCWBReq)
     val tl   = new ClientUncachedTileLinkIO()
-    val match_addr = UInt(OUTPUT,tl.tlBlockAddrBits)
-    val match_fetch = Bool(INPUT)
-    val match_create = Bool(INPUT)
-    val create = Bool(OUTPUT)
+    val lock = Decoupled(new TCTagLock)
   }
 
-  // meta.R             always read metadata first
-  // data.FWB           fetch and write back, fatch when F+R/W.miss
-  //                    WB when F+R/W.miss and C needs replace write-back
-  // data.R             read data array when W.h and F+R/R.h.t=1
-  // data.BW            write a whole cache block in data array when F+R/W.m and C
-  // data.RW            write a row in data array when W.h
-  // data.C             check the whole cache line to see if potentially tagFlag reset
-  // meta.W             write metadata when F.m, C, W.m and W.h.t!=t'
+  // IDLE:      idle, ready for new request
+  // MR:        read metadata
+  // DR:        read a row of data
+  // DWR:       write a row of data
+  // MW:        write metadata
+  // WB:        write back a line
+  // F:         fetch a line
+  // DWB:       write a line of data
 
-  val s_IDLE :: s_M_R_REQ :: s_M_R_RESP :: s_D_FWB_REQ :: s_D_FWB_RESP :: s_D_R_REQ :: s_D_R_RESP :: s_D_BW :: s_D_RW :: s_D_C_REQ :: s_D_C_RESP :: s_M_W :: Nil = Enum(UInt(), 12)
+
+  val s_IDLE :: s_MR :: s_DR :: s_DWR :: s_MW :: s_WB :: s_F :: s_DWB :: Nil = Enum(UInt(), 8)
   val state = Reg(init = s_IDLE)
+  val state_next = state
 
   // internal signals
-  val xact_queue = Queue(io.xact.req, nMemTransactors, true) // enforce temporal order
-  val xact = RegEnable(xact_queue.bits, xact_queue.fire())
+  val xact = io.xact.req.bits
   val byte_mask = Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
   val idx = xact.addr(idxBits+blockOffBits-1, blockOffBits)
-  val way_en = RegEnable(io.meta.resp.bits.way_en, state === s_M_R_RESP && io.meta.resp.valid)
   val row = xact.addr(blockOffBits-1,rowOffBits)
-  // break meta as workaround, do not really undersatnd the NO DEFAULT WIRE faults here
-  //val meta = Reg(new TCMetadata)
-  val meta_tag = Reg(init=UInt(0,tagBits))
-  val meta_state = Reg(init=TCMetadata.Invalid)
-  val meta_tagFlag = Reg(init=Bool(false))
-  val fetch_tagFlag = Reg(init=Bool(false))
+  val meta = RegEnable(io.meta.resp.bits, io.meta.resp.valid)
   val addrTag = xact.addr >> untagBits
-  val (data_cnt, data_done) = Counter((state === s_D_BW && io.data.write.fire()) ||
-                                      (state === s_D_C_REQ && io.data.read.fire()), refillCycles)
-  val write_tag = xact.data.orR
-  val writeback_sent = Reg(init=Bool(false))
-  val writeback_done = Reg(init=Bool(false))
-  val fetch_sent = Reg(init=Bool(false))
-  val fetch_done = Reg(init=Bool(false))
-  val fetch_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
-  val (fetch_cnt, fetch_cnt_done) = Counter(state === s_D_FWB_RESP && io.tl.grant.fire(), outerDataBeats)
-  val (_, check_done) = Counter((state === s_D_C_REQ || state === s_D_C_RESP) &&
-                                        io.data.resp.valid, refillCycles)
-
-  io.match_addr := xact.addr >> tlBlockOffsetBits
-  io.create := io.xact.resp.valid && xact.op === TCTagOp.Create
-
-  // transaction request
-  xact_queue.ready := state === s_IDLE
+  val (data_cnt, data_done) = Counter(io.data.write.fire(), refillCycles)
+  val data_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
+  val (fetch_cnt, fetch_done) = Counter(io.tl.grant.fire(), outerDataBeats)
+  val update_meta = Reg(init = Bool(false))
+  val req_sent = Reg(init = Bool(false))
 
   // transaction response
   io.xact.resp.bits.id := xact.id
-  io.xact.resp.bits.hit := Bool(true)
-  io.xact.resp.bits.tagFlag := meta_tagFlag
-  io.xact.resp.bits.data := UInt(0)
-  io.xact.resp.bits.tagUpdate := Bool(false)
-  io.xact.resp.valid := Bool(false)
+  io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
+  io.xact.resp.bits.tagFlag := meta.meta.tcnt // only make sense when hit
+  io.xact.resp.bits.data := io.data.resp.bits.data // only make sense for R and F when hit
+  io.xact.resp.valid := state =/= state_next && state_next === s_IDLE
 
   // metadata read
   io.meta.read.bits.id := UInt(id)
   io.meta.read.bits.idx := idx
   io.meta.read.bits.tag := addrTag
-  io.meta.read.valid := state === s_M_R_REQ
+  io.meta.read.valid := state === s_MR && !req_sent
 
   // metadata write
   io.meta.write.bits.idx := idx
-  io.meta.write.bits.way_en := way_en
-  io.meta.write.bits.data := TCMetadata(meta_tag, meta_tagFlag, meta_state)
-  io.meta.write.valid := state === s_M_W
+  io.meta.write.bits.way_en := meta.way_en
+  io.meta.write.bits.data := meta.meta
+  io.meta.write.valid := state === s_MW
 
   // data array read
   io.data.read.bits.id := UInt(id)
-  io.data.read.bits.row := Mux(state === s_D_C_REQ, data_cnt, row)
+  io.data.read.bits.row := row
   io.data.read.bits.idx := idx
-  io.data.read.bits.way_en := way_en
-  io.data.read.valid := state === s_D_R_REQ || state === s_D_C_REQ
-
-  // data read response
+  io.data.read.bits.way_en := meta.way_en
+  io.data.read.valid := state === s_DR && !req_sent
 
   // data array write
   io.data.write.bits.id := UInt(id)
-  io.data.write.bits.row := Mux(state === s_D_BW, data_cnt, row)
+  io.data.write.bits.row := Mux(state === s_DWB, data_cnt, row)
   io.data.write.bits.idx := idx
   io.data.write.bits.way_en := way_en
-  io.data.write.bits.data := Mux(state === s_D_BW, fetch_buf(data_cnt), xact.data)
-  io.data.write.bits.mask := Mux(state === s_D_BW, ~UInt(0,rowBytes), byte_mask)
-  io.data.write.valid := state === s_D_RW || state === s_D_BW
+  io.data.write.bits.data := Mux(state === s_DWB, data_buf(data_cnt), xact.data)
+  io.data.write.bits.mask := Mux(state === s_DWB, ~UInt(0,rowBytes), byte_mask)
+  io.data.write.valid := state === s_DWR || state === s_DWB
 
   // write-back
-  val wb_tag = Reg(UInt(width=tagBits))
-  val wb_empty = Reg(Bool())
-  io.wb.req.bits.id := UInt(id)
-  io.wb.req.bits.row := row
-  io.wb.req.bits.idx := idx
-  io.wb.req.bits.way_en := way_en
-  io.wb.req.bits.tag := wb_tag
-  io.wb.req.bits.empty := wb_empty && !tgHelper.is_top(xact.addr)
-  io.wb.req.valid := state === s_D_FWB_RESP && !writeback_sent
-
-  when(state === s_D_FWB_REQ) {
-    when(meta_state =/= TCMetadata.Dirty) { // writeback only dirty lines
-      writeback_sent := Bool(true)
-      writeback_done := Bool(true)
-    }.otherwise{
-      wb_tag := meta_tag
-      wb_empty := !meta_tagFlag
-    }
-  }
-  when(state === s_D_FWB_RESP) {
-    when(io.wb.req.fire()) {
-      writeback_sent := Bool(true)
-    }
-    when(io.wb.resp.valid) {
-      writeback_done := Bool(true)
-    }
-    when(writeback_done && fetch_done) {
-      writeback_sent := Bool(false)
-      writeback_done := Bool(false)
-    }
-  }
+  io.wb.bits.id := UInt(id)
+  io.wb.bits.row := row
+  io.wb.bits.idx := idx
+  io.wb.bits.way_en := meta.way_en
+  io.wb.bits.tag := meta.meta.tag
+  io.wb.valid := state === s_WB
 
   // fetch
   io.tl.acquire.bits := GetBlock(UInt(id), tlGetBlockAddr(xact.addr))
-  io.tl.acquire.valid := state === s_D_FWB_RESP && !fetch_sent
-  io.tl.grant.ready := state === s_D_FWB_RESP && !fetch_done
+  io.tl.acquire.valid := state === s_F && !req_sent && !TCTagOp.isCreate(xact.op)
+  io.tl.grant.ready := state === s_F && req_sent
 
-  // meta check
-  when((state === s_D_C_REQ || state === s_D_C_RESP) && io.data.resp.valid) {
-    meta_tagFlag := meta_tagFlag || io.data.resp.bits.data =/= UInt(0)
-  }
+  // req_sent update
+  when(state =/= state_next) { req_sent := Bool(false) }
+  when(io.meta.read.ready || io.data.read.ready || io.tl.acquire.ready) { req_sent := Bool(true) }
+
+  // lock
+  io.lock.bits.id := xact.id
+  io.lock.bits.addr := xact.addr
+  io.lock.valid := state === s_IDLE && io.xact.req.valid && TCTagOp.isLock(xact.op)
 
   // data array update function
   def beat_data_update(tl_data:UInt, index:UInt) = {
     Mux(index === tlGetBeatAddr(xact.addr), (tl_data & ~xact.mask) | xact.data, tl_data)
   }
 
-  when(state === s_D_FWB_REQ) {
-    when(xact.op === TCTagOp.Create || io.match_fetch) {
+  // update meta and data
+  when(state === s_DR && io.data.resp.valid) {
+    data_buf(row) := io.data.resp.data
+  }
+
+  when(state =/= state_next && state_next === s_F) {
+    when(TCTagOp.isCreate(xact.op)) { // create
       (0 until outerDataBeats).foreach(i => {
-        fetch_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
+        data_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
       })
-      meta_tag := addrTag
-      meta_state := TCMetadata.Dirty // create always ends up in dirty
-      meta_tagFlag := write_tag
-      fetch_sent := Bool(true)
-      fetch_done := Bool(true)
+      meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Dirty) // create always ends up in dirty
     }.otherwise{
-      meta_tag := addrTag
-      meta_state := TCMetadata.Clean
-      meta_tagFlag := Bool(false)
-    }
-  }
-  when(state === s_D_FWB_RESP) {
-    when(io.tl.acquire.fire()) {
-      fetch_sent := Bool(true)
-    }
-    when(io.tl.grant.valid) {
-      val m_update_data = beat_data_update(io.tl.grant.bits.data, fetch_cnt)
-      fetch_buf(fetch_cnt) := m_update_data
-      meta_tagFlag := meta_tagFlag || m_update_data =/= UInt(0)
-      fetch_tagFlag := fetch_tagFlag || io.tl.grant.bits.data =/= UInt(0)
-      meta_state := Mux(m_update_data =/= io.tl.grant.bits.data, TCMetadata.Dirty, meta_state)
-      fetch_done := fetch_cnt_done
-    }
-    when(writeback_done && fetch_done) {
-      fetch_sent := Bool(false)
-      fetch_done := Bool(false)
-      fetch_tagFlag := Bool(false)
+      meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Clean)
     }
   }
 
-  when(state === s_D_FWB_REQ && io.match_fetch) {
-    printf(s"TagXact$id: (%d) fetch a zero block 0x%x from writeback scoreboard\n", io.xact.resp.bits.id, io.match_addr << tlBlockOffsetBits)
+  when(state === s_F && io.tl.grant.valid) {
+    val m_update_data = beat_data_update(io.tl.grant.bits.data, fetch_cnt)
+    data_buf(fetch_cnt) := m_update_data
+    meta.meta.tcnt := meta.meta.tcnt + Mux(m_update_data =/= UInt(0), UInt(1), UInt(0))
+    meta.meta.state := Mux(m_update_data =/= io.tl.grant.bits.data, TCMetadata.Dirty, meta.meta.state)
   }
 
-  when(io.xact.resp.valid) {
-    when(xact.op === TCTagOp.Read && io.xact.resp.bits.hit) {
-      printf(s"TagXact$id: (%d) Read 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
+  when(state === s_DWR && io.data.data.write.ready) {
+    when (xact.data.orR && !data_buf(row).orR) {
+      assert(!meta.meta.tcnt.andR, "add a tag in a full line is impossible!")
+      meta.meta.tcnt := meta.meta.tcnt + UInt(1)
     }
-    when(xact.op === TCTagOp.Read && !io.xact.resp.bits.hit) {
-      printf(s"TagXact$id: (%d) Read 0x%x miss\n", io.xact.resp.bits.id, xact.addr)
+    when (!xact.data.orR && data_buf(row).orR) {
+      assert(meta.meta.tcnt.orR, "clear a tag in an empty line is impossible!")
+      meta.meta.tcnt := meta.meta.tcnt - UInt(1)
     }
-    when(xact.op === TCTagOp.FetchRead) {
-      printf(s"TagXact$id: (%d) FetchRead 0x%x => %x\n", io.xact.resp.bits.id, xact.addr, io.xact.resp.bits.data)
-    }
-    when(xact.op === TCTagOp.Write) {
-      printf(s"TagXact$id: (%d) Write 0x%x <= %x using mask %x %d\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask, io.xact.resp.bits.tagUpdate)
-    }
-    when(xact.op === TCTagOp.Create) {
-      printf(s"TagXact$id: (%d) Create 0x%x <= %x using mask %x %d\n", io.xact.resp.bits.id, xact.addr, xact.data, xact.mask, io.xact.resp.bits.tagUpdate)
-    }
+    meta.meta.state := TCMetadata.Dirty
   }
 
   // state machine
-  when(state === s_IDLE && xact_queue.fire()) {
-    state := s_M_R_REQ
+  when(state === s_IDLE && io.xact.req.valid && io.lock.ready) {
+    state_next := s_MR
   }
-  when(state === s_M_R_REQ && io.meta.read.fire()) {
-    state := s_M_R_RESP
-  }
-  when(state === s_M_R_RESP && io.meta.resp.valid) {
-    meta_tag := io.meta.resp.bits.meta.tag
-    meta_state := io.meta.resp.bits.meta.state
-    meta_tagFlag := io.meta.resp.bits.meta.tagFlag
+  when(state === s_MR && io.meta.resp.valid) {
     when(io.meta.resp.bits.hit) {
-      when(!io.meta.resp.bits.meta.tagFlag) {
-        when(TCTagOp.isRead(xact.op) || !write_tag) {
-          // R/F+R hit,t==0
-          io.xact.resp.bits.tagFlag := Bool(false)
-          io.xact.resp.valid := Bool(true)
-          state := s_IDLE
-        }.otherwise{
-          // W/C hit,t==0
-          io.xact.resp.bits.tagFlag := Bool(true)
-          io.xact.resp.bits.tagUpdate := Bool(true)
-          io.xact.resp.valid := Bool(true)
-          meta_state := TCMetadata.Dirty
-          meta_tagFlag := Bool(true)
-          state := s_D_RW
-        }
-      }.otherwise{
-        // All hit,t!=0
-        state := s_D_R_REQ
+      state_next := s_DR
+      when(!TCTagOp.isWrite(xact.op) && io.meta.resp.bits.meta.tcnt === UInt(0)) {
+        // find an empty top map line
+        assert(tgHelper.is_top(xact.addr), "only top map lines can be empty and cached at any time!")
+        state_next := s_IDLE
       }
-    }.otherwise{
-      when(xact.op === TCTagOp.Read) {
-        // R miss
-        io.xact.resp.bits.hit := Bool(false)
-        io.xact.resp.valid := Bool(true)
-        state := s_IDLE
-      }.otherwise{
-        // F+R/W/C miss
-        state := s_D_FWB_REQ
-        when(xact.op === TCTagOp.Create && io.match_create) {
-          xact.op := TCTagOp.Write
-          printf(s"TagXact$id: (%d) Degrade Create into Write operation for 0x%x\n", io.xact.resp.bits.id, xact.addr)
-        }
+      when(xact.op === TCTagOp.U || xact.op === TCTagOp.I) {
+        // no need to read data for unlock or invalidation
+        state_next := s_IDLE
       }
+    }.otherwise {
+      // write back dirty lines
+      state_next := Mux(io.meta.resp.bits.meta.state === TCMetadata.Dirty, s_WB, s_F)
     }
   }
-  when(state === s_D_FWB_REQ) {
-    state := s_D_FWB_RESP
+  when(state === s_DR && io.data.resp.valid) {
+    state_next := Mux(TCTagOp.isWrite(xact.op), s_DWR, s_IDLE)
   }
-  when(state === s_D_FWB_RESP && fetch_done && writeback_done) {
-    // F+R/W/C miss
-    io.xact.resp.bits.tagUpdate := meta_tagFlag =/= fetch_tagFlag
-    io.xact.resp.bits.data := fetch_buf(row)
-    io.xact.resp.valid := Bool(true)
-    when(TCTagOp.isRead(xact.op)) {
-      xact.data := fetch_buf(row) // store read data for final xact.resp
+  when(state === s_DWR && io.data.data.write.ready) {
+    state_next := s_MW
+  }
+  when(state === s_WB && io.wb.req.ready) {
+    state_next := s_F
+  }
+  when(state === s_F && (fetch_done || TCTagOp.isCreate(xact.op))) {
+    state_next := s_DWB
+  }
+  when(state === s_DWB && data_done) {
+    state_next := s_MW
+  }
+  when(state === s_MW && io.meta.write.ready) {
+    state_next := s_IDLE
+  }
+
+  state := state_next
+
+  // run-time checks
+  assert(io.meta.resp.valid && xact.op === TCTagOp.W && io.meta.resp.bits.meta.hit,
+    "a tagcache write tracation should always hit in cache!")
+  assert(io.meta.resp.valid && xact.op === TCTagOp.U && io.meta.resp.bits.meta.hit,
+    "a tagcache unlock tracation should always hit in cache!")
+  assert(io.meta.resp.valid && xact.op === TCTagOp.I && io.meta.resp.bits.meta.hit,
+    "a tagcache invalidate tracation should always hit in cache!")
+  assert(io.meta.resp.valid && TCTagOp.isCreate(xact.op) && !io.meta.resp.bits.meta.hit,
+    "a tag cache create transaction should always miss in cache!")
+
+  // report log
+  when(io.xact.resp.valid) {
+    when(xact.op === TCTagOp.R && io.xact.resp.bits.hit) {
+      printf(s"TagXact$id: (%d) Read 0x%x => %x\n", xact.id, xact.addr, io.xact.resp.bits.data)
     }
-    state := s_D_BW
-  }
-  when(state === s_D_R_REQ && io.data.read.fire()) {
-    state := s_D_R_RESP
-  }
-  when(state === s_D_R_RESP && io.data.resp.valid) {
-    val data_update = (io.data.resp.bits.data & ~xact.mask) | xact.data
-    when(TCTagOp.isRead(xact.op) || data_update === io.data.resp.bits.data) {
-      // R/F+R hit,t!=0
-      io.xact.resp.bits.data := io.data.resp.bits.data
-      io.xact.resp.valid := Bool(true)
-      state := s_IDLE
-    }.otherwise{
-      // W/C hit, t!=0
-      xact.data := data_update
-      meta_state := TCMetadata.Dirty
-      meta_tagFlag := data_update.orR
-      state := s_D_RW
-      when(data_update.orR) { // if t' != 0
-        io.xact.resp.bits.tagFlag := Bool(true)
-        io.xact.resp.valid := Bool(true)
-      }
+    when(xact.op === TCTagOp.R && !io.xact.resp.bits.hit) {
+      printf(s"TagXact$id: (%d) Read 0x%x miss\n", xact.id, xact.addr)
     }
-  }
-  when(state === s_D_BW && data_done) {
-    state := s_M_W
-  }
-  when(state === s_D_RW && io.data.write.fire()) {
-    when(meta_tagFlag)
-    {
-      // t' != 0
-      state := s_M_W
-    }.otherwise{
-      // t: 1->0?
-      state := s_D_C_REQ
+    when(xact.op === TCTagOp.U) {
+      printf(s"TagXact$id: (%d) Unlock 0x%x\n", xact.id, xact.addr)
     }
-  }
-  when(state === s_D_C_REQ && data_done) {
-    state := s_D_C_RESP
-  }
-  when(state === s_D_C_RESP && check_done) {
-    io.xact.resp.bits.tagFlag := meta_tagFlag || io.data.resp.bits.data =/= UInt(0)
-    io.xact.resp.bits.tagUpdate := !io.xact.resp.bits.tagFlag
-    io.xact.resp.valid := Bool(true)
-    state := s_M_W
-  }
-  when(state === s_M_W && io.meta.write.fire()) {
-    state := s_IDLE
+    when(xact.op === TCTagOp.F) {
+      printf(s"TagXact$id: (%d) FetchRead 0x%x => %x\n", xact.id, xact.addr, io.xact.resp.bits.data)
+    }
+    when(xact.op === TCTagOp.FL) {
+      printf(s"TagXact$id: (%d) FetchRead and lock 0x%x => %x\n", xact.id, xact.addr, io.xact.resp.bits.data)
+    }
+    when(xact.op === TCTagOp.W) {
+      printf(s"TagXact$id: (%d) Write 0x%x <= %x using mask %x\n", xact..id, xact.addr, xact.data, xact.mask)
+    }
+    when(xact.op === TCTagOp.C) {
+      printf(s"TagXact$id: (%d) Create 0x%x\n", xact.id, xact.addr)
+    }
+    when(xact.op === TCTagOp.CL) {
+      printf(s"TagXact$id: (%d) Create and lock 0x%x\n", xact.id, xact.addr)
+    }
+    when(xact.op === TCTagOp.I) {
+      printf(s"TagXact$id: (%d) Invalidate 0x%x\n", xact.id, xact.addr)
+    }
   }
 
 }
