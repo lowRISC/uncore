@@ -288,6 +288,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val s_IDLE :: s_MR :: s_DR :: s_DWR :: s_MW :: s_WB :: s_F :: s_DWB :: Nil = Enum(UInt(), 8)
   val state = Reg(init = s_IDLE)
   val state_next = state
+  state := state_next
 
   // internal signals
   val xact = io.xact.req.bits
@@ -449,8 +450,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state_next := s_IDLE
   }
 
-  state := state_next
-
   // run-time checks
   assert(io.meta.resp.valid && TCTagOp.isCreate(xact.op) && !io.meta.resp.bits.meta.hit,
     "a tag cache create transaction should always miss in cache!")
@@ -493,12 +492,12 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
 class TCXact(implicit p: Parameters) extends TCBundle()(p) with HasTCAddr {
   val rw = Bool() // r:0 w:1
-  val mem_data = UInt(width = rowBits)
-  val mem_mask = UInt(width = rowBits)
-  val tt_data = UInt(width = rowBits)
-  val tm_data = Bool()
-  val tc_tagUpdate = Bool()
-  val tc_tagFlag = Bool()
+  val mem_data = UInt(width = tgHelper.cacheBlockTagBits)
+  val tt_tag1 = Bool() // the target tag is set
+  val tt_tagN = Bool() // there are other tags
+  val tm0_tag1 = Bool()
+  val tm0_tagN = Bool()
+  val tm1_tag1 = Bool()
 }
 
 class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
@@ -523,142 +522,160 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   val coh = ManagerMetadata.onReset(innerPM)
 
   // ------------ tag cache state machine states -------------- //
-  // TT.R               read tag table
-  // TM0.R              read tag map 0
-  // TM1.F+R            force read tag map 1
-  // TM0.F+R            force read tag map 0
-  // TM0.C              create an empty line in tag map 0
-  // TT.F+R             force read tag table
-  // TT.C               create a line in tag table
-  // TT.W               write to tag table
-  // TM0.W              write to tag map 0
-  // TM1.W              write to tag map 1
+  // IDLE:          ready fro new memory transactions
+  // TTR:           read tag table
+  // TM0R:          read tag map 0
+  // TM1F:          force read of tag map 1
+  // TM0F:          force read of tag map 0
+  // TTF:           force read of tag table
+  // TM1L:          lock tag map 1
+  // TM0L:          lock tag map 0, does not really lock it but to force read or create
+  // TTL:           lock tag table, does not really lock it but to force read or create
+  // TTW:           invalidate or update tag table if necessary
+  // TM0W:          invalidate or update tag map 0 if necessary
+  // TM1W:          update tag map 1 if necessary, or just unlock it
 
-  val ts_IDLE :: ts_TT_R :: ts_TM0_R :: ts_TM1_FR :: ts_TM0_FR :: ts_TT_FR :: ts_TM0_C :: ts_TT_C :: ts_TT_W :: ts_TM0_W :: ts_TM1_W :: Nil = Enum(UInt(), 11)
-  val tc_state_next = Wire(init = ts_IDLE)
+  val ts_IDLE :: ts_TTR :: ts_TM0R :: ts_TM1F :: ts_TM0F :: ts_TTF :: ts_TM1L :: ts_TM0L :: ts_TTL :: ts_TTW :: ts_TM0W :: ts_TM1W :: Nil = Enum(UInt(), 12)
   val tc_state = Reg(init = ts_IDLE)
+  val tc_state_next = tc_state
   tc_state := tc_state_next
+
   val tc_xact = Reg(new TCXact)                 // record of tag cache search procedure
   val tc_req_valid = Wire(Bool())               // start the tag cache search transaction
   val tx_req_fire = Reg(init = Bool(false))     // tag transaction request fired
-  val tx_resp_hit = Reg(init = Bool(false))     // tag cache search hit
-  val tx_resp_valid = Reg(init = Bool(false))   // response from tag transaction trackers ready
   val tc_wdata_valid = Reg(init = Bool(false))  // the tag write data is ready from TileLink
   val tc_tt_update =                            // whether needs to update tag table
-    ((tc_xact.tt_data & ~tc_xact.mem_mask) | tc_xact.mem_data) =/= tc_xact.tt_data
+    tc_xact.mem_data =/= tc_xact.tt_data
   val tc_tt_addr = tgHelper.pa2tta(tc_xact.addr)
   val tc_tt_byte_index = tgHelper.pa2ttr(tc_xact.addr, rowOffBits)
   val tc_tt_valid = Reg(init = Bool(false))     // identify when tc_xact.tt_data is ready
+  val tc_tt_rdata = io.tc.resp.bits.data >> (tc_tt_byte_index << 3)
+  val tc_tt_wdata = tc_xact.mem_data << (tc_tt_byte_index << 3)
+  val tc_tt_wmask = ~UInt(0, tgHelper.cacheBlockTagBits) << (tc_tt_byte_index << 3)
   val tc_tm0_addr = tgHelper.pa2tm0a(tc_xact.addr)
   val tc_tm0_bit_index = tgHelper.pa2tm0b(tc_xact.addr, rowOffBits)
+  val tc_tm0_rdata = io.tc.resp.bits.data(tc_tm0_bit_index)
+  val tc_tm0_wdata = (tc_xact.tt_tag1 || tc_xact.tt_tagN) << tc_tm0_bit_index
+  val tc_tm0_wmask = UInt(1) << tc_tm0_bit_index
   val tc_tm1_addr = tgHelper.pa2tm1a(tc_xact.addr)
   val tc_tm1_bit_index = tgHelper.pa2tm1b(tc_xact.addr, rowOffBits)
+  val tc_tm1_rdata = io.tc.resp.bits.data(tc_tm1_bit_index)
+  val tc_tm1_wdata = (tc_xact.tm0_tag1 || tc_xact.tm0_tagN) << tc_tm1_bit_index
+  val tc_tm1_wmask = UInt(1) << tc_tm1_bit_index // check generated verilog
 
   when(tc_state =/= tc_state_next) {
     tx_req_fire := Bool(false)
-    tx_resp_valid := Bool(false)
   }
   when(io.tc.req.fire()) {
     tx_req_fire := Bool(true)
   }
-  when(io.tc.resp.valid) {
-    tx_resp_hit := io.tc.resp.bits.hit
-    tx_resp_valid := Bool(true)
-  }
-
-  when(!tx_req_fire && tc_state =/= ts_IDLE && !io.create_rdy) {
-    printf(s"MemTransactor$id Waits for create scoreboard ready...\n")
-  }
 
   // tag transaction request
-  io.tc.req.valid := !tx_req_fire && tc_state =/= ts_IDLE && io.create_rdy
+  io.tc.req.valid := !tx_req_fire && tc_state =/= ts_IDLE
   io.tc.req.bits.id   := UInt(id)
   io.tc.req.bits.data := UInt(0)
   io.tc.req.bits.mask := UInt(0)
   io.tc.req.bits.addr := UInt(0)
   io.tc.req.bits.op   := UInt(0)
+
   switch(tc_state) {
-    is(ts_TT_R) {
+    is(ts_TTR) {
       io.tc.req.bits.addr := tc_tt_addr
-      io.tc.req.bits.op   := TCTagOp.Read
+      io.tc.req.bits.op   := TCTagOp.R
     }
-    is(ts_TM0_R) {
+    is(ts_TM0R) {
       io.tc.req.bits.addr := tc_tm0_addr
-      io.tc.req.bits.op   := TCTagOp.Read
+      io.tc.req.bits.op   := TCTagOp.R
     }
-    is(ts_TM1_FR) {
+    is(ts_TM1F) {
       io.tc.req.bits.addr := tc_tm1_addr
-      io.tc.req.bits.op   := TCTagOp.FetchRead
+      io.tc.req.bits.op   := TCTagOp.F
     }
-    is(ts_TM0_FR) {
+    is(ts_TM0F) {
       io.tc.req.bits.addr := tc_tm0_addr
-      io.tc.req.bits.op   := TCTagOp.FetchRead
+      io.tc.req.bits.op   := TCTagOp.F
     }
-    is(ts_TT_FR) {
+    is(ts_TTF) {
       io.tc.req.bits.addr := tc_tt_addr
-      io.tc.req.bits.op   := TCTagOp.FetchRead
+      io.tc.req.bits.op   := TCTagOp.F
     }
-    is(ts_TM0_C) {
-      io.tc.req.bits.addr := tc_tm0_addr
-      io.tc.req.bits.op   := TCTagOp.Create
-    }
-    is(ts_TT_C) {
-      io.tc.req.bits.data := tc_xact.mem_data
-      io.tc.req.bits.mask := tc_xact.mem_mask
-      io.tc.req.bits.addr := tc_tt_addr
-      io.tc.req.bits.op   := TCTagOp.Create
-    }
-    is(ts_TT_W) {
-      io.tc.req.bits.data := tc_xact.mem_data
-      io.tc.req.bits.mask := tc_xact.mem_mask
-      io.tc.req.bits.addr := tc_tt_addr
-      io.tc.req.bits.op   := TCTagOp.Write
-    }
-    is(ts_TM0_W) {
-      io.tc.req.bits.data := tc_xact.tc_tagFlag << tc_tm0_bit_index
-      io.tc.req.bits.mask := UInt(1) << tc_tm0_bit_index
-      io.tc.req.bits.addr := tc_tm0_addr
-      io.tc.req.bits.op   := TCTagOp.Write
-    }
-    is(ts_TM1_W) {
-      io.tc.req.bits.data := tc_xact.tc_tagFlag << tc_tm1_bit_index
-      io.tc.req.bits.mask := UInt(1) << tc_tm1_bit_index
+    is(ts_TM1L) {
       io.tc.req.bits.addr := tc_tm1_addr
-      io.tc.req.bits.op   := TCTagOp.Write
+      io.tc.req.bits.op   := TCTagOp.FL
+    }
+    is(ts_TM0L) {
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := Mux(tc_xact.tm1_tag1, TCTagOp.F, TCTagOp.C)
+    }
+    is(ts_TTL) {
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := Mux(tc_xact.tm0_tag1, TCTagOp.F, TCTagOp.C)
+    }
+    is(ts_TTW) {
+      io.tc.req.bits.data := tc_tt_wdata
+      io.tc.req.bits.mask := tc_tt_wmask
+      io.tc.req.bits.addr := tc_tt_addr
+      io.tc.req.bits.op   := Mux(tc_xact.mem_data === UInt(0) && !tc_xact.tt_tagN, TCTagOp.I, TCTagOp.W)
+    }
+    is(ts_TM0W) {
+      io.tc.req.bits.data := tc_tm0_wdata
+      io.tc.req.bits.mask := tc_tm0_wmask
+      io.tc.req.bits.addr := tc_tm0_addr
+      io.tc.req.bits.op   := Mux(!tc_xact.tt_tag1 && !tc_xact.tt_tagN && !tc_xact.tm0_tagN, TCTagOp.I, TCTagOp.W)
+    }
+    is(ts_TM1W) {
+      io.tc.req.bits.data := tc_tm1_wdata
+      io.tc.req.bits.mask := tc_tm1_wmask
+      io.tc.req.bits.addr := tc_tm1_addr
+      io.tc.req.bits.op   := Mux((tc_xact.tm0_tag1 || tc_xact.tm0_tagN) =/= tc_xact.tm1_tag1, TCTagOp.W, TCTagOp.U)
     }
   }
 
   // tag transaction response
   when(io.tc.resp.valid) {
     switch(tc_state) {
-      is(ts_TT_R) {
-        tc_xact.tt_data := io.tc.resp.bits.data
+      is(ts_TTR) {
+        when(!tc_xact.rw) {
+          tc_xact.mem_data := tc_tt_rdata
+        }
       }
-      is(ts_TM0_R) {
-        tc_xact.tm_data := io.tc.resp.bits.data(tc_tm0_bit_index)
+      is(ts_TM0R) {
+        when(!tc_xact.rw && io.tc.resp.bits.hit && !tc_tm0_rdata) {
+          tc_xact.mem_data := UInt(0)
+        }
       }
-      is(ts_TM1_FR) {
-        tc_xact.tm_data := io.tc.resp.bits.data(tc_tm1_bit_index)
+      is(ts_TM1F) {
+        when(!tc_xact.rw && io.tc.resp.bits.hit && !tc_tm1_rdata) {
+          tc_xact.mem_data := UInt(0)
+        }
       }
-      is(ts_TM0_FR) {
-        tc_xact.tm_data := io.tc.resp.bits.data(tc_tm0_bit_index)
+      is(ts_TM0F) {
+        when(!tc_xact.rw && !tc_tm0_rdata) {
+          tc_xact.mem_data := UInt(0)
+        }
       }
-      is(ts_TT_FR) {
-        tc_xact.tt_data := io.tc.resp.bits.data
+      is(ts_TTF) {
+        when(!tc_xact.rw) {
+          tc_xact.mem_data := tc_tt_rdata
+        }
       }
-      is(ts_TM0_C) {
-        tc_xact.tc_tagFlag := io.tc.resp.bits.tagFlag
+      is(ts_TM1L) {
+        tc_xact.tm1_tag1 := tc_tm1_rdata
+        tc_xact.tm1_tagN := io.tc.resp.bits.meta.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tm1_wmask) =/= UInt(0)
       }
-      is(ts_TT_C) {
-        tc_xact.tc_tagFlag := io.tc.resp.bits.tagFlag
+      is(ts_TM0L) {
+        tc_xact.tm1_tag1 := tc_xact.tm1_tag1 && tc_tm0_rdata
+        tc_xact.tm1_tagN := tc_xact.tm1_tag1 && (io.tc.resp.bits.meta.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tm0_wmask) =/= UInt(0))
+      }
+      is(ts_TTL) {
+        tc_xact.tt_tag1 := tc_xact.tm0_tag1 && tc_tt_rdata =/= UInt(0)
+        tc_xact.tt_tagN := tc_xact.tm0_tag1 && (io.tc.resp.bits.meta.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tt_wmask) =/= UInt(0))
+      }
+      is(ts_TTW) {
+        tc_xact.tt_tag1 := tc_xact.mem_data =/= UInt(0)
       }
       is(ts_TT_W) {
-        tc_xact.tc_tagFlag := io.tc.resp.bits.tagFlag
-        tc_xact.tc_tagUpdate := io.tc.resp.bits.tagUpdate
-      }
-      is(ts_TM0_W) {
-        tc_xact.tc_tagFlag := io.tc.resp.bits.tagFlag
-        tc_xact.tc_tagUpdate := io.tc.resp.bits.tagUpdate
+        tc_xact.tm0_tag1 := tc_xact.tt_tag1 || tc_xact.tt_tagN
       }
     }
   }
