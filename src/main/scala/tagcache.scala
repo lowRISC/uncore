@@ -305,7 +305,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // transaction response
   io.xact.resp.bits.id := xact.id
   io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
-  io.xact.resp.bits.tagFlag := meta.meta.tcnt // only make sense when hit
+  io.xact.resp.bits.tcnt := meta.meta.tcnt // only make sense when hit
   io.xact.resp.bits.data := io.data.resp.bits.data // only make sense for R and F when hit
   io.xact.resp.valid := state =/= state_next && state_next === s_IDLE
 
@@ -361,7 +361,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // data array update function
   def beat_data_update(tl_data:UInt, index:UInt) = {
-    Mux(index === tlGetBeatAddr(xact.addr), (tl_data & ~xact.mask) | xact.data, tl_data)
+    Mux(index === tlGetBeatAddr(xact.addr) && xact.op === TCTagOp.W, (tl_data & ~xact.mask) | xact.data, tl_data)
   }
 
   // update meta and data
@@ -369,7 +369,11 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     data_buf(row) := io.data.resp.data
   }
 
-  when(state =/= state_next && state_next === s_F) {
+  when(state === s_MR && state_next === s_MW) {
+    meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Invalid)
+  }
+
+  when((state =/= state_next && state_next === s_F) {
     when(TCTagOp.isCreate(xact.op)) { // create
       (0 until outerDataBeats).foreach(i => {
         data_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
@@ -404,20 +408,26 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state_next := s_MR
   }
   when(state === s_MR && io.meta.resp.valid) {
-    when(io.meta.resp.bits.hit) {
+    when(xact.op === TCTagOp.U) {
+      // no need to read data for unlock or invalidation
+      state_next := s_IDLE
+    }.elsewhen(io.meta.resp.bits.hit) {
       state_next := s_DR
       when(!TCTagOp.isWrite(xact.op) && io.meta.resp.bits.meta.tcnt === UInt(0)) {
         // find an empty top map line
         assert(tgHelper.is_top(xact.addr), "only top map lines can be empty and cached at any time!")
         state_next := s_IDLE
       }
-      when(xact.op === TCTagOp.U || xact.op === TCTagOp.I) {
-        // no need to read data for unlock or invalidation
-        state_next := s_IDLE
+      when(xact.op === TCTagOp.I) {
+        state_next := s_MW
       }
     }.otherwise {
       // write back dirty lines
-      state_next := Mux(io.meta.resp.bits.meta.state === TCMetadata.Dirty, s_WB, s_F)
+      when(xact.op === TCTagOp.I) {
+        state_next := s_IDLE
+      }.otherwise {
+        state_next := Mux(io.meta.resp.bits.meta.state === TCMetadata.Dirty, s_WB, s_F)
+      }
     }
   }
   when(state === s_DR && io.data.resp.valid) {
@@ -442,12 +452,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   state := state_next
 
   // run-time checks
-  assert(io.meta.resp.valid && xact.op === TCTagOp.W && io.meta.resp.bits.meta.hit,
-    "a tagcache write tracation should always hit in cache!")
-  assert(io.meta.resp.valid && xact.op === TCTagOp.U && io.meta.resp.bits.meta.hit,
-    "a tagcache unlock tracation should always hit in cache!")
-  assert(io.meta.resp.valid && xact.op === TCTagOp.I && io.meta.resp.bits.meta.hit,
-    "a tagcache invalidate tracation should always hit in cache!")
   assert(io.meta.resp.valid && TCTagOp.isCreate(xact.op) && !io.meta.resp.bits.meta.hit,
     "a tag cache create transaction should always miss in cache!")
 
