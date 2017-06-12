@@ -743,7 +743,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   outer.grant.ready := mt_state === ms_IGNT && inner.grant.ready
 
   // tag
-  tc_req_valid := mt_state === ms_IDLE && inner.release.fire()
+  tc_req_valid := mt_state === irel_done
 
   when(mt_state === ms_IDLE && inner.release.fire()) {
     tc_wdata_valid := Bool(false)
