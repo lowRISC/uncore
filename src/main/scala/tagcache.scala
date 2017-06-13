@@ -898,27 +898,20 @@ class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
   val xBlockSize = p(CacheBlockBytes) * nTagTransactors
   val nBlocks = tgHelper.topSize / xBlockSize
 
-  val rst_req_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
-  val rst_ack_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
-  when(rst_req_cnt =/= UInt(nBlocks) && io.tag_xact.req.fire()) { rst_req_cnt := rst_req_cnt + UInt(1) }
-  when(rst_ack_cnt =/= UInt(nBlocks) && io.tag_xact.resp.valid) { rst_ack_cnt := rst_ack_cnt + UInt(1) }
+  val rst_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
+  when(rst_cnt =/= UInt(nBlocks) && io.tag_xact.resp.valid) { rst_cnt := rst_cnt + UInt(1) }
 
   // normal operation
   io.tag_xact.req.valid  := io.mem_xact.req.valid
   io.tag_xact.req.bits   := io.mem_xact.req.bits
-  io.mem_xact.req.ready  := io.tag_xact.req.ready
   io.mem_xact.resp.valid := io.tag_xact.resp.valid
   io.mem_xact.resp.bits  := io.tag_xact.resp.bits
 
-  when(rst_ack_cnt =/= UInt(nBlocks)) {
-    // during initialization
-    io.tag_xact.req.valid  := rst_req_cnt =/= UInt(nBlocks)
-      io.tag_xact.req.bits.data := UInt(0)
-      io.tag_xact.req.bits.mask := UInt(0)
-      io.tag_xact.req.bits.addr :=
-        UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_req_cnt * UInt(xBlockSize)
-      io.tag_xact.req.bits.op   := TCTagOp.Create
-    io.mem_xact.req.ready  := Bool(false)
+  // tagcache initialization for the top map
+  when(rst_cnt =/= UInt(nBlocks)) {
+    io.tag_xact.req.valid  := Bool(true)
+    io.tag_xact.req.bits.addr := UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_cnt * UInt(xBlockSize)
+    io.tag_xact.req.bits.op   := TCTagOp.C
     io.mem_xact.resp.valid := Bool(false)
   }
 
@@ -947,7 +940,6 @@ class TCTagXactDemux(banks: Int)(implicit p: Parameters) extends TCModule()(p) {
     o.req.bits := io.in.req.bits
   }}
 
-  io.in.req.ready := Mux1H(i_sel, io.out.map(_.req.ready))
   io.in.resp := Mux1H(o_sel, io.out.map(_.resp))
 }
 
