@@ -1020,6 +1020,14 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
     arb.io.in <> ins
   }
 
+  def doTcOutputArbitration[T <: Bundle](out: ValidIO[T], ins: Seq[ValidIO[T]])
+  {
+    val req = Vec(ins.map(_.valid)).toBits
+    val alloc = PriorityEncoderOH(req)
+    out.valid := req.orR
+    out.bits := ins(alloc).bits
+  }
+
   def doTcInputRouting[T <: Bundle with HasTCId](in: ValidIO[T], outs: Seq[ValidIO[T]], base:Int = 0) {
     outs.zipWithIndex.foreach{ case(out, i) => {
       out.bits := in.bits
@@ -1050,60 +1058,5 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   // connect tagXactTrackers to writeback unit
   doTcOutputArbitration(wb.io.xact.req, tagTrackers.map(_.io.wb.req))
   doTcInputRouting(wb.io.xact.resp, tagTrackers.map(_.io.wb.resp), nMemTransactors)
-
-  // empty block scoreboard
-  tagTrackers.zipWithIndex.foreach{ case(t,i) => {
-    wb.io.addr_block(i) := t.io.match_addr
-    t.io.match_fetch <> wb.io.addr_match(i)
-  }}
-  wb.io.mtActive := Vec(memTrackers.map(t =>
-    t.io.tl_block && (t.io.tm0_addr === wb.io.wb_addr || t.io.tt_addr === wb.io.wb_addr))).toBits
-
-  // create scoreboard
-  val create_sb_tm0_addr = Reg(init=Vec.fill(nMemTransactors)(UInt(0,io.inner.tlBlockAddrBits)))
-  val create_sb_tm0_stat = Reg(init=Vec.fill(nMemTransactors)(UInt(0,nMemTransactors)))
-  val create_sb_tt_addr = Reg(init=Vec.fill(nMemTransactors)(UInt(0,io.inner.tlBlockAddrBits)))
-  val create_sb_tt_stat = Reg(init=Vec.fill(nMemTransactors)(UInt(0,nMemTransactors)))
-
-  tagTrackers.foreach( t => {
-    t.io.match_create := (0 until nMemTransactors).map( i =>
-      (t.io.match_addr === create_sb_tm0_addr(i) && create_sb_tm0_stat(i) =/= UInt(0)) ||
-      (t.io.match_addr === create_sb_tt_addr(i) && create_sb_tt_stat(i) =/= UInt(0))
-    ).reduce(_||_)
-  })
-
-  (0 until nMemTransactors).foreach( i => {
-    when(memTrackers(i).io.tl_block && create_sb_tm0_stat(i)(i)) {
-      create_sb_tm0_stat(i) := Vec(memTrackers.zipWithIndex.map{ case(t,j) =>
-        if(i==j) Bool(true) else t.io.tl_block && t.io.tm0_addr === create_sb_tm0_addr(i)}).toBits
-    }.elsewhen(create_sb_tm0_stat(i) =/= UInt(0)) {
-      create_sb_tm0_stat(i) := create_sb_tm0_stat(i) & Vec(memTrackers.map(_.io.tl_block)).toBits
-    }.otherwise{
-      tagTrackers.foreach( t => {
-        when(t.io.create && memTrackers(i).io.create_tm0 && t.io.xact.resp.bits.id === UInt(i)) {
-          create_sb_tm0_addr(i) := t.io.match_addr
-          create_sb_tm0_stat(i) := UInt(1) << i
-        }
-      })
-    }
-
-    when(memTrackers(i).io.tl_block && create_sb_tt_stat(i)(i)) {
-      create_sb_tt_stat(i) := Vec(memTrackers.zipWithIndex.map{ case(t,j) =>
-        if(i==j) Bool(true) else t.io.tl_block && t.io.tm0_addr === create_sb_tt_addr(i)}).toBits
-    }.elsewhen(create_sb_tt_stat(i) =/= UInt(0)) {
-      create_sb_tt_stat(i) := create_sb_tt_stat(i) & Vec(memTrackers.map(_.io.tl_block)).toBits
-    }.otherwise {
-      tagTrackers.foreach( t => {
-        when(t.io.create && memTrackers(i).io.create_tt && t.io.xact.resp.bits.id === UInt(i)) {
-          create_sb_tt_addr(i) := t.io.match_addr
-          create_sb_tt_stat(i) := UInt(1) << i
-        }
-      })
-    }
-
-    memTrackers(i).io.create_rdy := (memTrackers(i).io.create_tm0 && create_sb_tm0_stat(i) === UInt(0)) ||
-                                    (memTrackers(i).io.create_tt && create_sb_tt_stat(i) === UInt(0)) ||
-                                    (!memTrackers(i).io.create_tm0 && !memTrackers(i).io.create_tt)
-  })
 
 }
