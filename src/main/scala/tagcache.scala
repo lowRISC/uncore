@@ -4,6 +4,7 @@ package uncore
 import Chisel._
 import cde.{Parameters, Field}
 import junctions._
+import scala.math.{min, max}
 
 case object TCMemTransactors extends Field[Int]
 case object TCTagTransactors extends Field[Int]
@@ -17,6 +18,7 @@ trait HasTCParameters extends HasCoherenceAgentParameters
   val nMemReleaseTransactors = if(uncached) 0 else 1
   val nMemTransactors = nMemReleaseTransactors + nMemAcquireTransactors
   val nTagTransactors = p(TCTagTransactors)
+  val nTopMapBlocks = max(1, tgHelper.topSize / p(CacheBlockBytes))
 
   val refillCycles = outerDataBeats
 
@@ -895,8 +897,7 @@ class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
   }
 
   require(isPow2(nTagTransactors))
-  val xBlockSize = p(CacheBlockBytes) * nTagTransactors
-  val nBlocks = tgHelper.topSize / xBlockSize
+  val nBlocks = if(nTopMapBlocks < nTagTransactors && id < nTopMapBlocks) 1 else nTopMapBlocks / nTagTransactors
 
   val rst_cnt = Reg(init = UInt(0, log2Up(nBlocks+1)))
   when(rst_cnt =/= UInt(nBlocks) && io.tag_xact.resp.valid) { rst_cnt := rst_cnt + UInt(1) }
