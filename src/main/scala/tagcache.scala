@@ -715,6 +715,8 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   require(inner.tlDataBits == outer.tlDataBits)
   require(inner.tlDataBeats == outer.tlDataBeats)
   val xact = Reg(new BufferedReleaseFromSrc()(innerPM))
+  val tmask = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
+  val tdata = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
 
   val irel_done = connectIncomingDataBeatCounter(inner.release)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire)
@@ -741,8 +743,6 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
 
   // tag
   when(inner.release.fire()) {
-    val tmask = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
-    val tdata = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
     tmask(inner.release.bits.addr_beat) := ~UInt(0,tgHelper.tagSize(inner.tlDataBits))
     tdata(inner.release.bits.addr_beat) := inner.release.bits.tag
     write_tc_xact_data(tdata.toBits, tmask.toBits)
@@ -781,6 +781,9 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   require(inner.tlDataBits == outer.tlDataBits)
   require(inner.tlDataBeats == outer.tlDataBeats)
   val xact  = Reg(new BufferedAcquireFromSrc()(innerPM))
+  val xact_tag_buffer = Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))).fromBits(tc_xact_mem_data)
+  val tmask = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
+  val tdata = Wire(Vec.fill(inner.tlDataBeats)(UInt(0,tgHelper.tagSize(inner.tlDataBits))))
 
   val iacq_cnt = inner.acquire.bits.addr_beat
   val iacq_cnt_reg = RegEnable(iacq_cnt, inner.acquire.fire())
@@ -796,14 +799,16 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     (0 until refillCycles).foreach( i => {
       xact.wmask_buffer(i) := UInt(0)
       xact.tmask_buffer(i) := UInt(0)
-      xact.tag_buffer(i) := UInt(0)    // always assume mem_data is initially 0 when checking tag update
     })
+    tc_xact_mem_data := UInt(0)
   }
 
   when(inner.acquire.fire()) {
     xact.data_buffer(iacq_cnt) := inner.acquire.bits.data
     xact.wmask_buffer(iacq_cnt) := inner.acquire.bits.wmask()
-    xact.tag_buffer(iacq_cnt) := inner.acquire.bits.tag
+    tmask(iacq_cnt) := inner.acquire.bits.tmask()
+    tdata(iacq_cnt) := inner.acquire.bits.tag
+    write_tc_xact_data(tdata.toBits, tmask.toBits)
     xact.tmask_buffer(iacq_cnt) := inner.acquire.bits.tmask()
   }
   inner.acquire.ready := (mt_state === ms_IDLE && tc_state === ts_IDLE) || mt_state === ms_IACQ
@@ -817,7 +822,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
     addr_block = xact.addr_block,
     addr_beat = oacq_cnt,
     data = xact.data_buffer(oacq_cnt),
-    tag = xact.tag_buffer(oacq_cnt),
+    tag = xact_tag_buffer(oacq_cnt),
     union = Mux(xact.isBuiltInType(),
       Acquire.makeUnion( // re-assemble union to rectify wmask
         a_type = xact.a_type,
@@ -838,35 +843,23 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   }
 
   // inner grant
-  inner.grant.valid := mt_state === ms_IGNT && (!inner.grant.bits.hasData() || tc_tt_valid)
-  val ignt_block_tag = tc_xact.tt_data >> (tc_tt_byte_index * UInt(8))
-  val ignt_tag = Wire(Vec(innerDataBeats, UInt(width=innerTagBits)))
-  ignt_tag := ignt_tag.fromBits(ignt_block_tag(tgHelper.cacheBlockTagBits-1,0))
+  inner.grant.valid := mt_state === ms_IGNT && (!inner.grant.bits.hasData() || tc_state === ts_IDLE)
   inner.grant.bits := coh.makeGrant(
     acq = xact,
     manager_xact_id = UInt(id),
     addr_beat = ignt_cnt,
     data = xact.data_buffer(ignt_cnt),
-    tag = ignt_tag(ignt_cnt)
+    tag = xact_tag_buffer(ignt_cnt)
   )
 
   // inner finish
   inner.finish.ready := mt_state === ms_IFIN
 
   // tag
-  tc_req_valid := mt_state === ms_IDLE && inner.acquire.fire()
-
-  when(mt_state === ms_IDLE && inner.acquire.fire()) {
-    tc_wdata_valid := Bool(false)
-    tc_xact.rw := inner.acquire.bits.hasData()
-    tc_xact.addr := inner.acquire.bits.full_addr()
-  }
-
-  when(mt_state === ms_OACQ && !tc_wdata_valid) {
-    tc_xact.mem_data := xact.tag_buffer.toBits << (tc_tt_byte_index * UInt(8))
-    tc_xact.mem_mask := FillInterleaved(tgBits, xact.tmask_buffer.toBits) << (tc_tt_byte_index * UInt(8))
-    tc_wdata_valid := Bool(true)
-  }
+  tc_req_valid := iacq_done
+  tc_xact_rw := xact.hasData()
+  tc_xact_mem_mask := xact.tmask_buffer.toBits
+  tc_xact_mem_addr := xact.full_addr()
 
   // tl conflicts
   io.tl_addr_block := xact.addr_block
