@@ -129,7 +129,11 @@ class TCTagXactIO(implicit p: Parameters) extends TCBundle()(p) {
   val resp = Valid(new TCTagResp).flip
 }
 
-class TCTagLock(implicit p: Parameters) extends TCBundle()(p) with HasTCId with HasTCAddr
+class TCTagLock(implicit p: Parameters) extends TCBundle()(p) with HasTCId
+{
+  val addr = UInt(width=log2Up(tgHelper.map0Size)-tgHelper.blockOffBits) // only compare the offset after remove map0 base addr
+  val lock = Bool() // lock or unlock
+}
 
 ////////////////////////////////////////////////////////////////
 // tag cache metadata array
@@ -285,9 +289,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // WB:        write back a line
   // F:         fetch a line
   // DWB:       write a line of data
+  // L:         lock or unlock
 
 
-  val s_IDLE :: s_MR :: s_DR :: s_DWR :: s_MW :: s_WB :: s_F :: s_DWB :: Nil = Enum(UInt(), 8)
+  val s_IDLE :: s_MR :: s_DR :: s_DWR :: s_MW :: s_WB :: s_F :: s_DWB :: s_L :: Nil = Enum(UInt(), 9)
   val state = Reg(init = s_IDLE)
   val state_next = state
   state := state_next
@@ -310,7 +315,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
   io.xact.resp.bits.tcnt := meta.meta.tcnt // only make sense when hit
   io.xact.resp.bits.data := io.data.resp.bits.data // only make sense for R and F when hit
-  io.xact.resp.valid := state =/= state_next && state_next === s_IDLE
+  io.xact.resp.valid := state === s_L && state_next === s_IDLE
 
   // metadata read
   io.meta.read.bits.id := UInt(id)
@@ -359,8 +364,9 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // lock
   io.lock.bits.id := xact.id
-  io.lock.bits.addr := xact.addr
-  io.lock.valid := state === s_IDLE && io.xact.req.valid && TCTagOp.isLock(xact.op)
+  io.lock.bits.addr := xact.addr >> tgHelper.blockOffBits
+  io.lock.bits.lock := TCTagOp.isLock(xact.op)
+  io.lock.valid := state === s_L && io.xact.req.valid && tgHelper.is_map(xact.addr)
 
   // data array update function
   def beat_data_update(tl_data:UInt, index:UInt) = {
@@ -407,19 +413,19 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   // state machine
-  when(state === s_IDLE && io.xact.req.valid && io.lock.ready) {
+  when(state === s_IDLE && io.xact.req.valid) {
     state_next := s_MR
   }
   when(state === s_MR && io.meta.resp.valid) {
     when(xact.op === TCTagOp.U) {
       // no need to read data for unlock or invalidation
-      state_next := s_IDLE
+      state_next := s_L
     }.elsewhen(io.meta.resp.bits.hit) {
       state_next := s_DR
       when(!TCTagOp.isWrite(xact.op) && io.meta.resp.bits.meta.tcnt === UInt(0)) {
         // find an empty top map line
         assert(tgHelper.is_top(xact.addr), "only top map lines can be empty and cached at any time!")
-        state_next := s_IDLE
+        state_next := s_L
       }
       when(xact.op === TCTagOp.I) {
         state_next := s_MW
@@ -427,14 +433,14 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }.otherwise {
       // write back dirty lines
       when(xact.op === TCTagOp.I) {
-        state_next := s_IDLE
+        state_next := s_L
       }.otherwise {
         state_next := Mux(io.meta.resp.bits.meta.state === TCMetadata.Dirty, s_WB, s_F)
       }
     }
   }
   when(state === s_DR && io.data.resp.valid) {
-    state_next := Mux(TCTagOp.isWrite(xact.op), s_DWR, s_IDLE)
+    state_next := Mux(TCTagOp.isWrite(xact.op), s_DWR, s_L)
   }
   when(state === s_DWR && io.data.data.write.ready) {
     state_next := s_MW
@@ -449,6 +455,9 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     state_next := s_MW
   }
   when(state === s_MW && io.meta.write.ready) {
+    state_next := s_L
+  }
+  when(state === s_L && io.lock.ready) {
     state_next := s_IDLE
   }
 
@@ -972,6 +981,41 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   val wb = Module(new TCWritebackUnit(nMemTransactors + nTagTransactors))
 
+  // transaction locks
+  val nLocks = min(nMemTransactors, nTopMapBlocks) + 1
+  val lock_vec = Reg(init = Vec.fill(nLocks)(TCTagLock()))
+  val lock_avail = lock_vec.map(!_.lock)
+  val lock_avail_bit = lock_avail.reduce(_||_)
+  val lock_alloc = PriorityEncoder(lock_avail)
+  val lock_req = tagTrackers.map(t => t.io.lock.valid && t.io.lock.bits.lock)
+  val lock_req_bit = lock_req.reduce(_||_)
+  val lock_req_chosen = PriorityEncoder(lock_req)
+
+  val tc_req_unblock = memTrackers.zip.map( mt => {
+    val lock_addr_match = lock_vec.map(_.addr === mt.io.tc.req.bits.addr(log2Up(tgHelper.map0Size, tgHelper.blockOffBits)))
+    val lock_id_match   = lock_vec.map(_.id === mt.io.tc.req.bits.id)
+    val lock_lock       = lock_vec.map(_.lock)
+    val need_lock       = tgHelper.is_map(mt.io.tc.req.bits.addr)
+    val locked          = lock_addr_match.zip(lock_id_match).zip(lock_lock).map{ case ((am, im), l) => am && !im && l}.reduce(_||_)
+    !need_lock || !locked
+  })
+
+  lock_vec.zipWithIndex.foreach{ case(lock, i) => {
+    val lock_match = tagTrackers.map( t => t.io.lock.valid && t.io.lock.bits.id === lock.id && !t.io.lock.bits.lock &&
+                                           t.io.lock.bits.addr === lock.addr)
+    when(lock.lock) {
+      lock.lock := Mux(lock_match.reduce(_||_), Bool(false), Bool(true))
+    }.elsewhen(lock_alloc === UInt(i) && lock_req_bit) {
+      lock.lock := Bool(true)
+      lock.id := tagTrackers(lock_req_chosen).io.lock.bits.id
+      lock.addr := tagTrackers(lock_req_chosen).io.lock.bits.addr
+    }
+  }}
+
+  tagTrackers.zipWithIndex.foreach{ case(t, i) => {
+    t.io.lock.ready := !t.io.lock.bits.lock || lock_req_chosen === UInt(i) && lock_avail_bit
+  }}
+
   // connect TileLink outputs
   val outer_arb = Module(new ClientUncachedTileLinkIOArbiter(nMemTransactors + nTagTransactors + 1)
                     (p.alterPartial({ case TLId => p(OuterTLId) })))
@@ -1023,9 +1067,9 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   def doTcOutputArbitration[T <: Bundle](out: ValidIO[T], ins: Seq[ValidIO[T]])
   {
-    val req = Vec(ins.map(_.valid)).toBits
-    val alloc = PriorityEncoderOH(req)
-    out.valid := req.orR
+    val req = ins.map(_.valid)
+    val alloc = PriorityEncoder(req)
+    out.valid := req.reduce(_||_)
     out.bits := ins(alloc).bits
   }
 
@@ -1038,7 +1082,11 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   // connect transactions from memTrackers to TagTrackers
   val tagXactDemuxers = memTrackers.map(_ => Module(new TCTagXactDemux(nTagTransactors)))
-  memTrackers.zip(tagXactDemuxers).foreach{ case(t, m) => t.io.tc <> m.io.in}
+  memTrackers.zip(tagXactDemuxers).zip(tc_req_unblock)foreach{ case((t, m), b) => {
+    m.io.in.req.valid := t.io.tc.req.valid && b
+    m.io.in.req.bits := t.io.tc.req.bits
+    t.io.tc.resp <> m.io.in.resp
+  }}
 
   tagTrackers.zip(tagTrackerInitiators).zipWithIndex.foreach{ case((t, ti), i) => {
     t.io.xact <> ti.io.tag_xact
@@ -1059,5 +1107,12 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   // connect tagXactTrackers to writeback unit
   doTcOutputArbitration(wb.io.xact.req, tagTrackers.map(_.io.wb.req))
   doTcInputRouting(wb.io.xact.resp, tagTrackers.map(_.io.wb.resp), nMemTransactors)
+
+  // connect the locking system
+  tagTrackers.zipWithIndex.foreach{ case(t, ti) => {
+    lock_req(ti) := t.lock.valid
+    t.lock.ready := !lock_valid.toBits.andR && lock_req_chosen === UInt(ti)
+  }
+
 
 }
