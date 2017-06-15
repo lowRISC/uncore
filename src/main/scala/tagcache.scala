@@ -310,7 +310,20 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   val byte_mask = Vec((0 until rowBytes).map(i => xact.mask(i*8+7, i*8).orR)).toBits
   val idx = xact.addr(idxBits+blockOffBits-1, blockOffBits)
   val row = xact.addr(blockOffBits-1,rowOffBits)
-  val meta = RegEnable(io.meta.resp.bits, io.meta.resp.valid)
+
+  // break meta as workaround, do not really undersatnd the NO DEFAULT WIRE faults here
+  // val meta = RegEnable(io.meta.resp.bits, io.meta.resp.valid)
+  val hit        = RegEnable(io.meta.resp.bits.hit,    io.meta.resp.valid)
+  val way_en     = RegEnable(io.meta.resp.bits.way_en, io.meta.resp.valid)
+  val meta_tag   = Reg(init=UInt(0,tagBits))
+  val meta_state = Reg(init=TCMetadata.Invalid)
+  val meta_tcnt  = Reg(init=UInt(0,log2Up(outerDataBeats+1)))
+  when(io.meta.resp.valid) {
+    meta_tag   := io.meta.resp.bits.meta.tag
+    meta_state := io.meta.resp.bits.meta.state
+    meta_tcnt  := io.meta.resp.bits.meta.tcnt
+  }
+
   val addrTag = xact.addr >> untagBits
   val (data_cnt, data_done) = Counter(io.data.write.fire(), refillCycles)
   val data_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
@@ -321,7 +334,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // transaction response
   io.xact.resp.bits.id := xact.id
   io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
-  io.xact.resp.bits.tcnt := meta.meta.tcnt // only make sense when hit
+  io.xact.resp.bits.tcnt := meta_tcnt // only make sense when hit
   io.xact.resp.bits.data := io.data.resp.bits.data // only make sense for R and F when hit
   io.xact.resp.valid := state === s_L && state_next === s_IDLE
 
@@ -333,22 +346,22 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // metadata write
   io.meta.write.bits.idx := idx
-  io.meta.write.bits.way_en := meta.way_en
-  io.meta.write.bits.data := meta.meta
+  io.meta.write.bits.way_en := way_en
+  io.meta.write.bits.data := TCMetadata(meta_tag, meta_tcnt, meta_state)
   io.meta.write.valid := state === s_MW
 
   // data array read
   io.data.read.bits.id := UInt(id)
   io.data.read.bits.row := row
   io.data.read.bits.idx := idx
-  io.data.read.bits.way_en := meta.way_en
+  io.data.read.bits.way_en := way_en
   io.data.read.valid := state === s_DR && !req_sent
 
   // data array write
   io.data.write.bits.id := UInt(id)
   io.data.write.bits.row := Mux(state === s_DWB, data_cnt, row)
   io.data.write.bits.idx := idx
-  io.data.write.bits.way_en := meta.way_en
+  io.data.write.bits.way_en := way_en
   io.data.write.bits.data := Mux(state === s_DWB, data_buf(data_cnt), xact.data)
   io.data.write.bits.mask := Mux(state === s_DWB, ~UInt(0,rowBytes), byte_mask)
   io.data.write.valid := state === s_DWR || state === s_DWB
@@ -357,8 +370,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.wb.bits.id := UInt(id)
   io.wb.bits.row := row
   io.wb.bits.idx := idx
-  io.wb.bits.way_en := meta.way_en
-  io.wb.bits.tag := meta.meta.tag
+  io.wb.bits.way_en := way_en
+  io.wb.bits.tag := meta_tag
   io.wb.valid := state === s_WB
 
   // fetch
@@ -387,7 +400,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   when(state === s_MR && state_next === s_MW) {
-    meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Invalid)
+    meta_state := TCMetadata.Invalid
   }
 
   when(state =/= state_next && state_next === s_F) {
@@ -395,29 +408,31 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       (0 until outerDataBeats).foreach(i => {
         data_buf(i) := beat_data_update(UInt(0,outerDataBits), UInt(i))
       })
-      meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Dirty) // create always ends up in dirty
+      meta_tcnt  := UInt(0)
+      meta_state := TCMetadata.Dirty // create always ends up in dirty
     }.otherwise{
-      meta.meta := TCMetadata(addrTag, UInt(0), TCMetadata.Clean)
+      meta_tcnt  := UInt(0)
+      meta_state := TCMetadata.Clean
     }
   }
 
   when(state === s_F && io.tl.grant.valid) {
     val m_update_data = beat_data_update(io.tl.grant.bits.data, fetch_cnt)
     data_buf(fetch_cnt) := m_update_data
-    meta.meta.tcnt := meta.meta.tcnt + Mux(m_update_data =/= UInt(0), UInt(1), UInt(0))
-    meta.meta.state := Mux(m_update_data =/= io.tl.grant.bits.data, TCMetadata.Dirty, meta.meta.state)
+    meta_tcnt := meta_tcnt + Mux(m_update_data =/= UInt(0), UInt(1), UInt(0))
+    meta_state := Mux(m_update_data =/= io.tl.grant.bits.data, TCMetadata.Dirty, meta_state)
   }
 
   when(state === s_DWR && io.data.write.ready) {
     when (xact.data.orR && !data_buf(row).orR) {
-      assert(!meta.meta.tcnt.andR, "add a tag in a full line is impossible!")
-      meta.meta.tcnt := meta.meta.tcnt + UInt(1)
+      assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
+      meta_tcnt := meta_tcnt + UInt(1)
     }
     when (!xact.data.orR && data_buf(row).orR) {
-      assert(meta.meta.tcnt.orR, "clear a tag in an empty line is impossible!")
-      meta.meta.tcnt := meta.meta.tcnt - UInt(1)
+      assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
+      meta_tcnt := meta_tcnt - UInt(1)
     }
-    meta.meta.state := TCMetadata.Dirty
+    meta_state := TCMetadata.Dirty
   }
 
   // state machine
