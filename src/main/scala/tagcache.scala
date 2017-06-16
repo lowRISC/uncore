@@ -301,8 +301,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
 
   val s_IDLE :: s_MR :: s_DR :: s_DWR :: s_MW :: s_WB :: s_F :: s_DWB :: s_L :: Nil = Enum(UInt(), 9)
-  val state = Reg(init = s_IDLE)
-  val state_next = state
+  val state      = Reg(init=s_IDLE)
+  val state_next = Wire(init=state)
   state := state_next
 
   // internal signals
@@ -335,8 +335,10 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.xact.resp.bits.id := xact.id
   io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
   io.xact.resp.bits.tcnt := meta_tcnt // only make sense when hit
-  io.xact.resp.bits.data := io.data.resp.bits.data // only make sense for R and F when hit
-  io.xact.resp.valid := state === s_L && state_next === s_IDLE
+  io.xact.resp.bits.data := UInt(0)   // only make sense for R and F when hit
+  io.xact.resp.valid := state =/= state_next && state_next === s_L
+  when(state === s_DR) { io.xact.resp.bits.data := io.data.resp.bits.data }
+  when(state === s_MW) { io.xact.resp.bits.data := data_buf(row) }
 
   // metadata read
   io.meta.read.bits.id := UInt(id)
@@ -347,7 +349,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // metadata write
   io.meta.write.bits.idx := idx
   io.meta.write.bits.way_en := way_en
-  io.meta.write.bits.data := TCMetadata(meta_tag, meta_tcnt, meta_state)
+  io.meta.write.bits.data := TCMetadata(addrTag, meta_tcnt, meta_state)
   io.meta.write.valid := state === s_MW
 
   // data array read
@@ -380,8 +382,11 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.tl.grant.ready := state === s_F && req_sent
 
   // req_sent update
-  when(state =/= state_next) { req_sent := Bool(false) }
-  when(io.meta.read.ready || io.data.read.ready || io.tl.acquire.ready) { req_sent := Bool(true) }
+  when(state =/= state_next) {
+    req_sent := Bool(false)
+  }.elsewhen(io.meta.read.fire() || io.data.read.fire() || io.tl.acquire.fire()) {
+    req_sent := Bool(true)
+  }
 
   // lock
   io.lock.bits.id := xact.id
@@ -455,7 +460,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       }
     }.otherwise {
       // write back dirty lines
-      when(xact.op === TCTagOp.I) {
+      when(xact.op === TCTagOp.I || xact.op === TCTagOp.R) {
         state_next := s_L
       }.otherwise {
         state_next := Mux(io.meta.resp.bits.meta.state === TCMetadata.Dirty, s_WB, s_F)
@@ -571,8 +576,8 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   // TM1W:          update tag map 1 if necessary, or just unlock it
 
   val ts_IDLE :: ts_TTR :: ts_TM0R :: ts_TM1F :: ts_TM0F :: ts_TTF :: ts_TM1L :: ts_TM0L :: ts_TTL :: ts_TTW :: ts_TM0W :: ts_TM1W :: Nil = Enum(UInt(), 12)
-  val tc_state = Reg(init = ts_IDLE)
-  val tc_state_next = tc_state
+  val tc_state      = Reg(init=ts_IDLE)
+  val tc_state_next = Wire(init=tc_state)
       tc_state := tc_state_next
 
   val tc_req_valid = Wire(Bool())
