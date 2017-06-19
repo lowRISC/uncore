@@ -333,12 +333,12 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // transaction response
   io.xact.resp.bits.id := xact.id
-  io.xact.resp.bits.hit := state === !s_MR || io.meta.resp.bits.hit
-  io.xact.resp.bits.tcnt := meta_tcnt // only make sense when hit
-  io.xact.resp.bits.data := UInt(0)   // only make sense for R and F when hit
-  io.xact.resp.valid := state =/= state_next && state_next === s_L
-  when(state === s_DR) { io.xact.resp.bits.data := io.data.resp.bits.data }
-  when(state === s_MW) { io.xact.resp.bits.data := data_buf(row) }
+  io.xact.resp.bits.hit := xact.op =/= TCTagOp.R || RegEnable(io.meta.resp.bits.hit, io.meta.resp.valid)
+  io.xact.resp.bits.tcnt := meta_tcnt       // only make sense when hit
+  io.xact.resp.bits.data := data_buf(row)   // only make sense for R and F when hit
+  io.xact.resp.valid := state === s_L && state_next === s_IDLE
+  when(io.meta.resp.valid) { data_buf(row) := UInt(0) }
+  when(io.data.resp.valid) { data_buf(row) := io.data.resp.bits.data }
 
   // metadata read
   io.meta.read.bits.id := UInt(id)
@@ -701,8 +701,12 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
         tc_xact_tm0_tagN := tc_xact_tm1_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tm0_wmask) =/= UInt(0))
       }
       is(ts_TTL) {
-        tc_xact_tt_tag1 := tc_xact_tm0_tag1 && tc_xact_mem_data =/= UInt(0)
+        val new_tt_tag1 = tc_xact_tm0_tag1 && (io.tc.resp.bits.data & tc_tt_wmask) =/= UInt(0) ||
+                          (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0)
+        tc_xact_tt_tag1 := new_tt_tag1
         tc_xact_tt_tagN := tc_xact_tm0_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tt_wmask) =/= UInt(0))
+        tc_xact_tm0_tag1 := tc_xact_tm0_tag1 || new_tt_tag1
+        tc_xact_tm1_tag1 := tc_xact_tm1_tag1 || new_tt_tag1
       }
     }
   }
@@ -712,26 +716,35 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
     tc_state_next := ts_TTR
   }
   when(tc_state === ts_TTR && io.tc.resp.valid) {
-    tc_state_next := Mux(io.tc.resp.bits.hit, Mux(tc_xact_rw && tc_xact_mem_data =/= tc_tt_rdata, ts_TM1L, ts_IDLE), ts_TM0R)
+    tc_state_next := Mux(!io.tc.resp.bits.hit, ts_TM0R,
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= (tc_tt_rdata & tc_xact_mem_data),
+                             ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TM0R && io.tc.resp.valid) {
     tc_state_next := Mux(!io.tc.resp.bits.hit, ts_TM1F,
-                         Mux(tc_tm0_rdata, ts_TTF, Mux(tc_xact_rw && tc_xact_mem_data =/= UInt(0), ts_TM1L, ts_IDLE)))
+                         Mux(tc_tm0_rdata, ts_TTF,
+                             Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE)))
   }
   when(tc_state === ts_TM1F && io.tc.resp.valid) {
-    tc_state_next := Mux(tc_tm1_rdata, ts_TM0F, Mux(tc_xact_rw && tc_xact_mem_data =/= UInt(0), ts_TM1L, ts_IDLE))
+    tc_state_next := Mux(tc_tm1_rdata, ts_TM0F,
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TM0F && io.tc.resp.valid) {
-    tc_state_next := Mux(tc_tm0_rdata, ts_TTF, Mux(tc_xact_rw && tc_xact_mem_data =/= UInt(0), ts_TM1L, ts_IDLE))
+    tc_state_next := Mux(tc_tm0_rdata, ts_TTF,
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TTF && io.tc.resp.valid) {
-    tc_state_next := Mux(tc_xact_rw && tc_xact_mem_data =/= tc_tt_rdata, ts_TM1L, ts_IDLE)
+    tc_state_next := Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= (tc_tt_rdata & tc_xact_mem_data),
+                         ts_TM1L, ts_IDLE)
   }
   when(tc_state === ts_TM1L && io.tc.resp.valid) {
     tc_state_next := ts_TM0L
   }
   when(tc_state === ts_TM0L && io.tc.resp.valid) {
     tc_state_next := ts_TTL
+  }
+  when(tc_state === ts_TTL && io.tc.resp.valid) {
+    tc_state_next := ts_TTW
   }
   when(tc_state === ts_TTW && io.tc.resp.valid) {
     tc_state_next := ts_TM0W
@@ -798,7 +811,7 @@ class TCMemReleaseTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   io.tl_addr_block := xact.addr_block
 
   // ------------ memory tracker state machine ---------------- //
-  when(mt_state === ms_IDLE && inner.release.fire()) {
+  when(mt_state === ms_IDLE && tc_state === ms_IDLE && inner.release.fire()) {
     xact := inner.release.bits
     mt_state := Mux(irel_done, ms_OACQ, ms_IREL)
   }
@@ -841,7 +854,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire, iacq_cnt_reg)
 
   // inner acquire
-  when(mt_state === ms_IDLE) {
+  when(mt_state === ms_IDLE && tc_state === ms_IDLE) {
     (0 until refillCycles).foreach( i => {
       xact.wmask_buffer(i) := UInt(0)
       xact.tmask_buffer(i) := UInt(0)
@@ -904,7 +917,10 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // tag
   tc_req_valid := iacq_done
   tc_xact_rw := xact.hasData()
-  tc_xact_mem_mask := xact.tmask_buffer.toBits
+  val tmask_bits = xact.tmask_buffer.toBits
+  val xact_mem_mask_vec = Wire(Vec.fill(tgHelper.cacheBlockTagBits/tgBits)(UInt(width=tgBits)))
+  xact_mem_mask_vec.zipWithIndex.map { case(v,i) => { v := Mux(tmask_bits(i), ~UInt(0, tgBits), UInt(0, tgBits)) }}
+  tc_xact_mem_mask := xact_mem_mask_vec.toBits
   tc_xact_mem_addr := xact.full_addr()
 
   // tl conflicts
