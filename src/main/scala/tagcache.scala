@@ -429,11 +429,11 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   when(state === s_DWR && io.data.write.ready) {
-    when (xact.data.orR && !data_buf(row).orR) {
+    when ((xact.data & xact.mask).orR && !data_buf(row).orR) {
       assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
       meta_tcnt := meta_tcnt + UInt(1)
     }
-    when (!xact.data.orR && data_buf(row).orR) {
+    when (!(xact.data & xact.mask).orR && data_buf(row).orR) {
       assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
       meta_tcnt := meta_tcnt - UInt(1)
     }
@@ -701,12 +701,9 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
         tc_xact_tm0_tagN := tc_xact_tm1_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tm0_wmask) =/= UInt(0))
       }
       is(ts_TTL) {
-        val new_tt_tag1 = tc_xact_tm0_tag1 && (io.tc.resp.bits.data & tc_tt_wmask) =/= UInt(0) ||
+        tc_xact_tt_tag1 := tc_xact_tm0_tag1 && (io.tc.resp.bits.data & tc_tt_wmask) =/= UInt(0) ||
                           (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0)
-        tc_xact_tt_tag1 := new_tt_tag1
         tc_xact_tt_tagN := tc_xact_tm0_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tt_wmask) =/= UInt(0))
-        tc_xact_tm0_tag1 := tc_xact_tm0_tag1 || new_tt_tag1
-        tc_xact_tm1_tag1 := tc_xact_tm1_tag1 || new_tt_tag1
       }
     }
   }
