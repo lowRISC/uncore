@@ -274,6 +274,9 @@ class TCWritebackUnit(id: Int)(implicit p: Parameters) extends TCModule()(p) wit
     state := s_IDLE
   }
 
+  when(io.req.fire()) {
+    printf(s"TagWB$id: (%d) Write back 0x%x\n", xact.id, Cat(xact.tag, xact.idx, UInt(0, tlBlockOffsetBits)))
+  }
 }
 
 ////////////////////////////////////////////////////////////////
@@ -325,7 +328,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   val addrTag = xact.addr >> untagBits
-  val (data_cnt, data_done) = Counter(io.data.write.fire(), refillCycles)
+  val (data_cnt, data_done) = Counter(state === s_DWB && io.data.write.fire(), refillCycles)
   val data_buf = Reg(Vec(outerDataBeats, UInt(width=outerDataBits)))
   val (fetch_cnt, fetch_done) = Counter(io.tl.grant.fire(), outerDataBeats)
   val update_meta = Reg(init = Bool(false))
@@ -364,7 +367,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.data.write.bits.row := Mux(state === s_DWB, data_cnt, row)
   io.data.write.bits.idx := idx
   io.data.write.bits.way_en := way_en
-  io.data.write.bits.data := Mux(state === s_DWB, data_buf(data_cnt), xact.data)
+  io.data.write.bits.data := Mux(state === s_DWB, data_buf(data_cnt), data_buf(row))
   io.data.write.bits.mask := Mux(state === s_DWB, ~UInt(0,rowBytes), byte_mask)
   io.data.write.valid := state === s_DWR || state === s_DWB
 
@@ -401,7 +404,15 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // update meta and data
   when(state === s_DR && io.data.resp.valid) {
-    data_buf(row) := io.data.resp.bits.data
+    data_buf(row) := (xact.data & xact.mask) | (io.data.resp.bits.data & ~xact.mask)
+    when ((xact.data & xact.mask).orR && !io.data.resp.bits.data.orR) {
+      assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
+      meta_tcnt := meta_tcnt + UInt(1)
+    }
+    when (!(xact.data & xact.mask).orR && io.data.resp.bits.data.orR) {
+      assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
+      meta_tcnt := meta_tcnt - UInt(1)
+    }
   }
 
   when(state === s_MR && state_next === s_MW) {
@@ -429,14 +440,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   when(state === s_DWR && io.data.write.ready) {
-    when ((xact.data & xact.mask).orR && !data_buf(row).orR) {
-      assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
-      meta_tcnt := meta_tcnt + UInt(1)
-    }
-    when (!(xact.data & xact.mask).orR && data_buf(row).orR) {
-      assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
-      meta_tcnt := meta_tcnt - UInt(1)
-    }
     meta_state := TCMetadata.Dirty
   }
 
@@ -492,6 +495,8 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   // run-time checks
   assert(io.meta.resp.valid && TCTagOp.isCreate(xact.op) && !io.meta.resp.bits.hit,
     "a tag cache create transaction should always miss in cache!")
+  assert(state =/= state_next && data_cnt === UInt(0) && fetch_cnt === UInt(0),
+    "counters should return to zero when state changes!")
 
   // report log
   when(io.xact.resp.valid) {
