@@ -850,6 +850,10 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   val (ignt_cnt, ignt_done) = connectOutgoingDataBeatCounter(inner.grant, ognt_cnt_reg)
   val (oacq_cnt, oacq_done) = connectOutgoingDataBeatCounter(outer.acquire, iacq_cnt_reg)
 
+  def tmaskFill(tmask:UInt):UInt = {
+    Vec(tmask.toBools.map(t => Mux(t, ~UInt(0, tgBits), UInt(0, tgBits)))).toBits
+  }
+
   // inner acquire
   when(mt_state === ms_IDLE && tc_state === ms_IDLE) {
     (0 until refillCycles).foreach( i => {
@@ -862,7 +866,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   when(inner.acquire.fire()) {
     xact.data_buffer(iacq_cnt) := inner.acquire.bits.data
     xact.wmask_buffer(iacq_cnt) := inner.acquire.bits.wmask()
-    tmask(iacq_cnt) := inner.acquire.bits.tmask()
+    tmask(iacq_cnt) := tmaskFill(inner.acquire.bits.tmask())
     tdata(iacq_cnt) := inner.acquire.bits.tag
     write_tc_xact_data(tdata.toBits, tmask.toBits)
     xact.tmask_buffer(iacq_cnt) := inner.acquire.bits.tmask()
@@ -914,10 +918,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   // tag
   tc_req_valid := iacq_done
   tc_xact_rw := xact.hasData()
-  val tmask_bits = xact.tmask_buffer.toBits
-  val xact_mem_mask_vec = Wire(Vec.fill(tgHelper.cacheBlockTagBits/tgBits)(UInt(width=tgBits)))
-  xact_mem_mask_vec.zipWithIndex.map { case(v,i) => { v := Mux(tmask_bits(i), ~UInt(0, tgBits), UInt(0, tgBits)) }}
-  tc_xact_mem_mask := xact_mem_mask_vec.toBits
+  tc_xact_mem_mask := tmaskFill(xact.tmask_buffer.toBits)
   tc_xact_mem_addr := xact.full_addr()
 
   // tl conflicts
