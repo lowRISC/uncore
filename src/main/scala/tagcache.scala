@@ -493,10 +493,12 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   }
 
   // run-time checks
-  assert(io.meta.resp.valid && TCTagOp.isCreate(xact.op) && !io.meta.resp.bits.hit,
+  assert(!io.meta.resp.valid || !TCTagOp.isCreate(xact.op) || !io.meta.resp.bits.hit,
     "a tag cache create transaction should always miss in cache!")
-  assert(state =/= state_next && data_cnt === UInt(0) && fetch_cnt === UInt(0),
+  assert(state === state_next || (data_cnt === UInt(0) || data_done) && (fetch_cnt === UInt(0) || fetch_done),
     "counters should return to zero when state changes!")
+  //assert(state === s_IDLE || Reg(next=state) === s_IDLE || xact.toBits === Reg(next=xact).toBits,
+  //  "request to tag tracker cannot change during a transaction!")
 
   // report log
   when(io.xact.resp.valid) {
