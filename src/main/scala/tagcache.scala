@@ -409,7 +409,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   io.lock.bits.id := xact.id
   io.lock.bits.addr := xact.addr >> tgHelper.blockOffBits
   io.lock.bits.lock := TCTagOp.isLock(xact.op)
-  io.lock.valid := state === s_L && io.xact.req.valid && tgHelper.is_map(xact.addr)
+  io.lock.valid := state === s_L && tgHelper.is_map(xact.addr)
 
   // data array update function
   def beat_data_update(tl_data:UInt, index:UInt) = {
@@ -1094,6 +1094,9 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   tagTrackers.zipWithIndex.foreach{ case(t, i) => {
     t.io.lock.ready := !t.io.lock.bits.lock || lock_req_chosen(i) && lock_avail_bit
   }}
+
+  assert(memTrackers.map(_.io.tl_block).reduce(_||_) || !lock_vec.map(_.lock).reduce(_||_),
+    "all tag cache lines should be unlocked when the cache is idle!")
 
   // connect TileLink outputs
   val outer_arb = Module(new ClientUncachedTileLinkIOArbiter(nMemTransactors + nTagTransactors + 1)
