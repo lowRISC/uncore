@@ -1071,7 +1071,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   val lock_req_chosen = PriorityEncoderOH(Vec(lock_req).toBits)
 
   val tc_req_unblock = memTrackers.map( mt => {
-    val lock_addr_match = lock_vec.map(_.addr === mt.io.tc.req.bits.addr(log2Up(tgHelper.map0Size), tgHelper.blockOffBits))
+    val lock_addr_match = lock_vec.map(_.addr === mt.io.tc.req.bits.addr(log2Up(tgHelper.map0Size)-1, tgHelper.blockOffBits))
     val lock_id_match   = lock_vec.map(_.id === mt.io.tc.req.bits.id)
     val lock_lock       = lock_vec.map(_.lock)
     val need_lock       = tgHelper.is_map(mt.io.tc.req.bits.addr)
@@ -1159,7 +1159,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   memTrackers.zip(tagXactDemuxers).zip(tc_req_unblock)foreach{ case((t, m), b) => {
     m.io.in.req.valid := t.io.tc.req.valid && b
     m.io.in.req.bits  := t.io.tc.req.bits
-    t.io.tc.req.ready := m.io.in.req.ready
+    t.io.tc.req.ready := m.io.in.req.ready && b
     t.io.tc.resp <> m.io.in.resp
   }}
 
