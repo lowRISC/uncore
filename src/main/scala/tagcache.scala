@@ -1184,3 +1184,41 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   doTcInputRouting(wb.io.xact.resp, tagTrackers.map(_.io.wb.resp), nMemTransactors)
 
 }
+
+
+class TagCacheTop(param: Parameters) extends Module
+{
+
+  implicit val p = param.alterPartial({
+    case CacheName => "TagCache"
+    case TLId => "TCtoMem"
+    case InnerTLId => "L2toTC"
+    case OuterTLId => "TCtoMem"
+    case BusId => "mem"
+  })
+
+  def connectNasti(outer: NastiIO, inner: NastiIO)(implicit p: Parameters) {
+    outer.ar <> Queue(inner.ar,1)
+    outer.aw <> Queue(inner.aw,1)
+    outer.w  <> Queue(inner.w,1)
+    inner.r  <> Queue(outer.r,1)
+    inner.b  <> Queue(outer.b,1)
+  }
+
+  // connect uncached tilelike -> nasti
+  def connectTilelinkNasti(nasti: NastiIO, tl: ClientUncachedTileLinkIO)(implicit p: Parameters) = {
+    val conv = Module(new NastiIOTileLinkIOConverter())
+    conv.io.tl <> tl
+    connectNasti(nasti, conv.io.nasti)
+  }
+
+  val io = new Bundle {
+    val in = new ManagerTileLinkIO()(p.alterPartial({case TLId => "L2toTC"}))
+    val out = new NastiIO()
+  }
+
+  val tc = Module(new TagCache)
+  tc.io.inner <> io.in
+  tc.io.incoherent := Vec.fill(tc.io.inner.tlNCachingClients)(Bool(false))
+  connectTilelinkNasti(io.out, tc.io.outer)
+}
