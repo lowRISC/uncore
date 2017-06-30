@@ -1,24 +1,31 @@
 // Unitest test bench for tagcache
 
-`indlude "tagcache.const.vh"
+`include "tagcache.consts.vh"
 
-module tagcache_tab;
+module tb;
 
+`ifdef N_L2_TRACKERS
    localparam L2Xacts = `N_L2_TRACKERS;
-   localparam MemSize = `ROCKET_MEM_SIZE;
-   localparam MemBase = `ROCKET_MEM_BASE;
+   localparam TLCIS = 7;
+   localparam TLMIS = 3;
+`else
+   localparam L2Xacts = 1;
+   localparam TLCIS = 5;
+   localparam TLMIS = 1;
+`endif
+   localparam [63:0] MemSize = `ROCKET_MEM_SIZE;
+   localparam [63:0] MemBase = `ROCKET_MEM_BASE;
    localparam MemAW   = 32;
    localparam MemDW   = 64;
    localparam MemTW   = 4;
    localparam MemBS   = 8;      // burst size
    localparam TLAW    = 32;
    localparam TLDW    = 64;
+   localparam TLTW    = 4;
    localparam TLBS    = 8;      // burst size
 
    //global records of transactions
    bit [TLAW-1:0] addr_queue[$] = {};
-   bit [TLBS-1:0][TLDW-1:0] memory_data_map [bit [TLAW-1:0]];
-   bit [TLBS-1:0][TLTW-1:0] memory_tag_map [bit [TLAW-1:0]];
 
 class TCXact;
    rand int unsigned             id;
@@ -49,20 +56,21 @@ class TCXact;
    function string toString(int resp = 0);
       string operation_str = rw ? "write" : "read";
       string size_str = burst ? "a block" : "a beat";
+      int index = addr[5:0]/(TLDW/8);
+      string beat_data = $sformatf("%8h,%1h", data[index], tag[index]);
+      string data_str = burst ? block_data : beat_data;
       string block_data;
       foreach(data[i]) begin
          if(i==0) block_data = $sformatf("%8h,%1h", data[0], tag[0]);
-         else     block_data = {$sformatf("%8,%1hh ", data[i], tag[i]), block_data};
+         else     block_data = {$sformatf("%8h,%1h ", data[i], tag[i]), block_data};
       end
-      string beat_data = $sformatf("%8h,%1h", data[addr[5:0]/(TLDW/8)], tag[addr[5:0]/(TLDW/8)]);
-      string data_str = burst ? block_data : beat_data;
       if(resp)
         return {$sformatf("L2 tracker %d response ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), !rw ? {" with data: ", data_str} : "" };
       else
         return {$sformatf("L2 tracker %d request ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), rw ? {" with data: ", data_str} : "" };
    endfunction // toString
 
-   function vid post_randomize();
+   function void post_randomize();
       if(addr_queue.size == 0)
         rw = 1;
 
@@ -82,11 +90,17 @@ class TCXact;
 
 endclass
 
+   typedef bit [TLBS-1:0][TLDW-1:0] cache_data_t;
+   typedef bit [TLBS-1:0][TLTW-1:0] cache_tag_t;
+   typedef bit [TLAW-1:0] addr_t;
+   cache_data_t memory_data_map [addr_t];
+   cache_tag_t  memory_tag_map  [addr_t];
+
    TCXact xact_queue[$] = {};
    mailbox   send_queue = new(L2Xacts*2);
    mailbox   recv_queue = new;
 
-   function record_xact(ref TCXact xact);
+   function record_xact(input TCXact xact);
       bit [TLAW-1:0] addr = xact.addr /  64 * 64;
       int unsigned   index = xact.addr[5:0]/(TLDW/8);
 
@@ -96,16 +110,19 @@ endclass
       xact_queue.push_front(xact);
    endfunction // record_xact
 
-   task check_xact(ref TCXact xact);
-      int qi[$] = xact_queue.find_last(x) with (s.id == xact.id);
+   task check_xact(input TCXact xact);
+      TCXact orig_xact;
+      bit [TLAW-1:0] addr;
+      int unsigned   index;
+      int qi[$] = xact_queue.find_last_index(x) with (x.id == xact.id);
       if(qi.size == 0)
            $fatal(1, "Get a response to an unknown transaction!n");
-      TCXact orig_xact = xact_queue[qi[0]];
-      bit [TLAW-1:0] addr = orig_xact.addr /  64 * 64;
-      int unsigned   index = xact.addr[5:0]/(TLDW/8);
+      orig_xact = xact_queue[qi[0]];
+      addr = orig_xact.addr /  64 * 64;
+      index = xact.addr[5:0]/(TLDW/8);
       if(xact.rw) begin         // write
          // update the data
-         if(!memory_data_map.exist(addr)) begin
+         if(!memory_data_map.exists(addr)) begin
             memory_data_map[addr] = 0;
             memory_tag_map[addr] = 0;
          end
@@ -117,7 +134,7 @@ endclass
             memory_tag_map[addr][index]  = orig_xact.tag[index];
          end
       end else begin            // read
-         if(!memory_data_map.exist(addr))
+         if(!memory_data_map.exists(addr))
            $fatal(1, "Read response miss in memory map!\n");
          if(xact.burst && (memory_data_map[addr] != xact.data || memory_tag_map[addr] != xact.tag))
            $fatal(1, "Read response mismatch with memory map!\n");
@@ -145,11 +162,11 @@ endclass
    endtask // xact_check
 
 
-   reg              clk, rest, init;
+   reg              clk, reset, init;
    logic            io_in_acquire_ready;
    reg              io_in_acquire_valid = 'b0;
    reg [TLAW-7:0]   io_in_acquire_bits_addr_block;
-   reg [6:0]        io_in_acquire_bits_client_xact_id;
+   reg [TLCIS-1:0]  io_in_acquire_bits_client_xact_id;
    reg [2:0]        io_in_acquire_bits_addr_beat;
    reg              io_in_acquire_bits_is_builtin_type;
    reg [2:0]        io_in_acquire_bits_a_type;
@@ -160,8 +177,8 @@ endclass
    reg              io_in_grant_ready;
    logic            io_in_grant_valid;
    logic [2:0]      io_in_grant_bits_addr_beat;
-   logic [6:0]      io_in_grant_bits_client_xact_id;
-   logic [2:0]      io_in_grant_bits_manager_xact_id;
+   logic [TLCIS-1:0]io_in_grant_bits_client_xact_id;
+   logic [TLMIS-1:0]io_in_grant_bits_manager_xact_id;
    logic            io_in_grant_bits_is_builtin_type;
    logic [3:0]      io_in_grant_bits_g_type;
    logic [TLDW-1:0] io_in_grant_bits_data;
@@ -169,7 +186,7 @@ endclass
    logic            io_in_grant_bits_client_id;
    logic            io_in_finish_ready;
    reg              io_in_finish_valid = 'b0;
-   reg [2:0]        io_in_finish_bits_manager_xact_id;
+   reg [TLMIS-1:0]  io_in_finish_bits_manager_xact_id;
    reg              io_in_probe_ready;
    logic            io_in_probe_valid;
    logic [TLAW-7:0] io_in_probe_bits_addr_block;
@@ -179,7 +196,7 @@ endclass
    reg              io_in_release_valid = 'b0;
    reg [2:0]        io_in_release_bits_addr_beat;
    reg [TLAW-7:0]   io_in_release_bits_addr_block;
-   reg [6:0]        io_in_release_bits_client_xact_id;
+   reg [TLCIS-1:0]  io_in_release_bits_client_xact_id;
    reg              io_in_release_bits_voluntary;
    reg [1:0]        io_in_release_bits_r_type;
    reg [TLDW-1:0]   io_in_release_bits_data;
@@ -197,8 +214,8 @@ endclass
    end
 
    initial begin
-      clock = 0;
-      forever #5 clock = !clock;
+      clk = 0;
+      forever #5 clk = !clk;
    end
 
    nasti_channel
@@ -218,20 +235,20 @@ endclass
    ram_behav
      (
       .clk           ( clk         ),
-      .rstn          ( rstn        ),
+      .rstn          ( !reset      ),
       .nasti         ( mem_nasti   )
       );
 
    task xact_send();
       while(1) begin
          TCXact xact;
-         @(posedge clock); #1;
+         @(posedge clk); #1;
          io_in_acquire_valid = 'b0;
          send_queue.get(xact);
 
          if(xact.rw && xact.burst) begin      // write a burst
             foreach(xact.data[i]) begin
-               @(posedge clock); #1;
+               @(posedge clk); #1;
                io_in_acquire_valid = 'b1;
                io_in_acquire_bits_addr_block = xact.addr >> 6;
                io_in_acquire_bits_client_xact_id = xact.id;
@@ -246,8 +263,8 @@ endclass
          end // if (xact.rw && xact.burst)
 
          if(xact.rw && !xact.burst) begin      // write a beat
-            beat = xact.addr[5:0] / (TLDW/8)
-            @(posedge clock); #1;
+            int beat = xact.addr[5:0] / (TLDW/8);
+            @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
             io_in_acquire_bits_client_xact_id = xact.id;
@@ -261,7 +278,7 @@ endclass
          end // if (xact.rw && !xact.burst)
 
          if(!xact.rw && xact.burst) begin      // read a block
-            @(posedge clock); #1;
+            @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
             io_in_acquire_bits_client_xact_id = xact.id;
@@ -272,8 +289,8 @@ endclass
          end // if (xact.rw && !xact.burst)
 
          if(!xact.rw && !xact.burst) begin      // read a beat
-            beat = xact.addr[5:0] / (TLDW/8)
-            @(posedge clock); #1;
+            int beat = xact.addr[5:0] / (TLDW/8);
+            @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
             io_in_acquire_bits_addr_beat = beat;
@@ -290,7 +307,7 @@ endclass
    task xact_recv();
       while(1'b1) begin
          TCXact xact = new;
-         @(posedge clock); #1;
+         @(posedge clk); #1;
          io_in_grant_ready = 'b1;
          #5; if(!io_in_grant_valid) @(posedge io_in_grant_valid);
 
@@ -311,30 +328,30 @@ endclass
          end
             
          if(io_in_grant_bits_g_type == 4'b101) begin
+            int i;
             xact.rw = 'b0;
             xact.burst = 'b1;
             xact.id = io_in_grant_bits_client_xact_id;
             xact.addr = 0;
             xact.data[io_in_grant_bits_addr_beat] = io_in_grant_bits_data;
             xact.tag[io_in_grant_bits_addr_beat] = io_in_grant_bits_tag;
-            int i;
-            for (i=1; i<TLBS, i=i+1) begin
-               @(posedge clock); #1;
+            for (i=1; i<TLBS; i=i+1) begin
+               @(posedge clk); #1;
                #5; if(!io_in_grant_valid) @(posedge io_in_grant_valid);
                xact.data[io_in_grant_bits_addr_beat] = io_in_grant_bits_data;
                xact.tag[io_in_grant_bits_addr_beat] = io_in_grant_bits_tag;
             end
          end // if (io_in_grant_bits_g_type == 4'b101)
 
-         @(posedge clock); #1;
+         @(posedge clk); #1;
          io_in_grant_ready = 'b0;
          recv_queue.put(xact);
       end
    endtask // xact_recv
 
-   TagCache DUT
+   TagCacheTop DUT
      (
-      .*
+      .*,
       .io_out_aw_valid         ( mem_nasti.aw_valid                     ),
       .io_out_aw_ready         ( mem_nasti.aw_ready                     ),
       .io_out_aw_bits_id       ( mem_nasti.aw_id                        ),
@@ -351,6 +368,7 @@ endclass
       .io_out_w_valid          ( mem_nasti.w_valid                      ),
       .io_out_w_ready          ( mem_nasti.w_ready                      ),
       .io_out_w_bits_data      ( mem_nasti.w_data                       ),
+      .io_out_w_bits_id        (                                        ),
       .io_out_w_bits_strb      ( mem_nasti.w_strb                       ),
       .io_out_w_bits_last      ( mem_nasti.w_last                       ),
       .io_out_w_bits_user      ( mem_nasti.w_user                       ),
