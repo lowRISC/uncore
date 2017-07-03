@@ -13,8 +13,6 @@ module tb;
    localparam TLCIS = 5;
    localparam TLMIS = 1;
 `endif
-   localparam [63:0] MemSize = `ROCKET_MEM_SIZE;
-   localparam [63:0] MemBase = `ROCKET_MEM_BASE;
    localparam MemAW   = 32;
    localparam MemDW   = 64;
    localparam MemTW   = 4;
@@ -23,9 +21,19 @@ module tb;
    localparam TLDW    = 64;
    localparam TLTW    = 4;
    localparam TLBS    = 8;      // burst size
+   localparam [63:0] MemSize = `ROCKET_MEM_SIZE / MemDW * (MemDW - MemTW);
+   localparam [63:0] MemBase = `ROCKET_MEM_BASE;
 
    //global records of transactions
    bit [TLAW-1:0] addr_queue[$] = {};
+   typedef bit [TLBS-1:0][TLDW-1:0] cache_data_t;
+   typedef bit [TLBS-1:0][TLTW-1:0] cache_tag_t;
+   typedef bit [TLAW-1:0] addr_t;
+   cache_data_t memory_data_map [addr_t];
+   cache_tag_t  memory_tag_map  [addr_t];
+
+   mailbox   send_queue = new(1);
+   mailbox   recv_queue = new(1);
 
 class TCXact;
    rand int unsigned             id;
@@ -37,6 +45,8 @@ class TCXact;
    rand bit                      rw;
    rand bit                      burst;
    rand bit                      zero_tag;
+
+   static TCXact xact_queue[$];
 
    // address types:
    //   0: just the last one
@@ -53,21 +63,34 @@ class TCXact;
    constraint id_constraint { id < L2Xacts; }
    constraint tag_constraint { zero_tag dist {0 := 1, 1 := 3}; }
 
+   function new();
+   endfunction // new
+
+   function copy(TCXact xact);
+      id    = xact.id;
+      addr  = xact.addr;
+      data  = xact.data;
+      tag   = xact.tag;
+      rw    = xact.rw;
+      burst = xact.burst;
+   endfunction // new
+
    function string toString(int resp = 0);
       string operation_str = rw ? "write" : "read";
       string size_str = burst ? "a block" : "a beat";
       int index = addr[5:0]/(TLDW/8);
-      string beat_data = $sformatf("%8h,%1h", data[index], tag[index]);
-      string data_str = burst ? block_data : beat_data;
-      string block_data;
-      foreach(data[i]) begin
-         if(i==0) block_data = $sformatf("%8h,%1h", data[0], tag[0]);
-         else     block_data = {$sformatf("%8h,%1h ", data[i], tag[i]), block_data};
+      string beat_data = $sformatf("\n%2d: %16h,%1h", index, data[index], tag[index]);
+      string data_str, block_data;
+      int    i;
+      for(i=0; i<TLBS; i=i+1) begin
+         if(i==0) block_data = $sformatf("\n%2d: %16h,%1h", i, data[0], tag[0]);
+         else     block_data = {block_data, $sformatf("\n%2d: %16h,%1h ", i, data[i], tag[i])};
       end
+      data_str = burst ? block_data : beat_data;
       if(resp)
-        return {$sformatf("L2 tracker %d response ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), !rw ? {" with data: ", data_str} : "" };
+        return {$sformatf("L2 tracker %2d response ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), !rw ? {" with data: ", data_str} : "" };
       else
-        return {$sformatf("L2 tracker %d request ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), rw ? {" with data: ", data_str} : "" };
+        return {$sformatf("L2 tracker %2d request ",id), operation_str, " ", size_str, " @ 0x", $sformatf("%8h",addr), rw ? {" with data: ", data_str} : "" };
    endfunction // toString
 
    function void post_randomize();
@@ -80,6 +103,10 @@ class TCXact;
          addr = addr < 0 ? addr + MemSize : addr;
          addr = burst ? addr / 64 * 64 : addr / (TLDW/8) * (TLDW/8);
          addr = addr + MemBase;
+         if(!memory_data_map.exists(addr / 64 * 64)) begin
+            burst = 1;
+            addr = addr / 64 * 64;
+         end
          if(zero_tag) tag = 0;
       end else begin            // read
          int index = addr_offset < 0 ? -addr_offset/64 : addr_offset/64;
@@ -88,76 +115,71 @@ class TCXact;
       end
    endfunction // post_randomize
 
-endclass
+   function void record();
+      bit [TLAW-1:0] baddr = addr /  64 * 64;
+      int unsigned   index = addr[5:0]/(TLDW/8);
 
-   typedef bit [TLBS-1:0][TLDW-1:0] cache_data_t;
-   typedef bit [TLBS-1:0][TLTW-1:0] cache_tag_t;
-   typedef bit [TLAW-1:0] addr_t;
-   cache_data_t memory_data_map [addr_t];
-   cache_tag_t  memory_tag_map  [addr_t];
-
-   TCXact xact_queue[$] = {};
-   mailbox   send_queue = new(L2Xacts*2);
-   mailbox   recv_queue = new;
-
-   function record_xact(input TCXact xact);
-      bit [TLAW-1:0] addr = xact.addr /  64 * 64;
-      int unsigned   index = xact.addr[5:0]/(TLDW/8);
-
-      addr_queue.push_front(addr);
+      addr_queue.push_front(baddr);
       if(addr_queue.size > 1024) addr_queue.pop_back();
 
-      xact_queue.push_front(xact);
-   endfunction // record_xact
+      xact_queue.push_front(this);
+   endfunction
 
-   task check_xact(input TCXact xact);
+   function void check();
       TCXact orig_xact;
-      bit [TLAW-1:0] addr;
+      bit [TLAW-1:0] baddr;
       int unsigned   index;
-      int qi[$] = xact_queue.find_last_index(x) with (x.id == xact.id);
+      int qi[$] = xact_queue.find_last_index(x) with (x.id == id);
       if(qi.size == 0)
            $fatal(1, "Get a response to an unknown transaction!n");
       orig_xact = xact_queue[qi[0]];
-      addr = orig_xact.addr /  64 * 64;
-      index = xact.addr[5:0]/(TLDW/8);
-      if(xact.rw) begin         // write
+      baddr = orig_xact.addr /  64 * 64;
+      index = addr[5:0]/(TLDW/8);
+      if(rw) begin         // write
          // update the data
-         if(!memory_data_map.exists(addr)) begin
-            memory_data_map[addr] = 0;
-            memory_tag_map[addr] = 0;
+         if(!memory_data_map.exists(baddr)) begin
+            memory_data_map[baddr] = 0;
+            memory_tag_map[baddr] = 0;
          end
          if(orig_xact.burst) begin
-            memory_data_map[addr] = orig_xact.data;
-            memory_tag_map[addr]  = orig_xact.tag;
+            memory_data_map[baddr] = orig_xact.data;
+            memory_tag_map[baddr]  = orig_xact.tag;
          end else begin
-            memory_data_map[addr][index] = orig_xact.data[index];
-            memory_tag_map[addr][index]  = orig_xact.tag[index];
+            memory_data_map[baddr][index] = orig_xact.data[index];
+            memory_tag_map[baddr][index]  = orig_xact.tag[index];
          end
+         addr = orig_xact.addr;
+         burst = orig_xact.burst;
       end else begin            // read
-         if(!memory_data_map.exists(addr))
+         if(!memory_data_map.exists(baddr))
            $fatal(1, "Read response miss in memory map!\n");
-         if(xact.burst && (memory_data_map[addr] != xact.data || memory_tag_map[addr] != xact.tag))
+         if(burst && (memory_data_map[baddr] != data || memory_tag_map[baddr] != tag))
            $fatal(1, "Read response mismatch with memory map!\n");
-         if(!xact.burst && (memory_data_map[addr][index] != xact.data[index] || memory_tag_map[addr][index] != xact.tag[index]))
+         if(!burst && (memory_data_map[baddr][index] != data[index] || memory_tag_map[baddr][index] != tag[index]))
            $fatal(1, "Read response mismatch with memory map!\n");
-      end // else: !if(xact.rw)
+      end // else: !if(rw)
       xact_queue.delete(qi[0]);
-   endtask // check_xact
+   endfunction // check
+
+endclass
 
    task xact_gen();
+      TCXact xact;
       while(1) begin
-         TCXact xact = new;
+         xact = new;
          xact.randomize();
-         record_xact(xact);
          send_queue.put(xact);
+         xact.record();
+         $info("Generate a %s\n", xact.toString());
       end
    endtask // xact_gen
 
    task xact_check();
+      TCXact xact;
       while(1) begin
-         TCXact xact;
          recv_queue.get(xact);
-         check_xact(xact);
+         xact.check();
+         $info("Recieve a %s\n", xact.toString(1));
       end
    endtask // xact_check
 
@@ -240,14 +262,15 @@ endclass
       );
 
    task xact_send();
+      TCXact xact = new;
       while(1) begin
-         TCXact xact;
          @(posedge clk); #1;
          io_in_acquire_valid = 'b0;
          send_queue.get(xact);
 
          if(xact.rw && xact.burst) begin      // write a burst
-            foreach(xact.data[i]) begin
+            int i;
+            for(i=0; i<TLBS; i=i+1) begin
                @(posedge clk); #1;
                io_in_acquire_valid = 'b1;
                io_in_acquire_bits_addr_block = xact.addr >> 6;
@@ -305,8 +328,9 @@ endclass
    endtask // xact_send
 
    task xact_recv();
-      while(1'b1) begin
-         TCXact xact = new;
+      TCXact xact;
+      while(1) begin
+         xact = new;
          @(posedge clk); #1;
          io_in_grant_ready = 'b1;
          #5; if(!io_in_grant_valid) @(posedge io_in_grant_valid);
@@ -399,5 +423,15 @@ endclass
       .io_out_r_bits_user      ( mem_nasti.r_user                       )
       );
    
+   initial begin
+      @(negedge reset);
+      fork
+         xact_gen();
+         xact_check();
+         xact_send();
+         xact_recv();
+      join_none
+   end
+
 endmodule // tagcache_tab
 
