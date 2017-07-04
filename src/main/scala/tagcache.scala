@@ -608,7 +608,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   val tc_tt_wdata   = Wire(UInt(width = rowBits))
       tc_tt_wdata  := tc_xact_mem_data << (tc_tt_byte_index << 3)
   val tc_tt_wmask   = Wire(UInt(width = rowBits))
-      tc_tt_wmask  := ~UInt(0, tgHelper.cacheBlockTagBits) << (tc_tt_byte_index << 3)
+      tc_tt_wmask  := tc_xact_mem_mask << (tc_tt_byte_index << 3)
   val tc_tm0_addr   = tgHelper.pa2tm0a(tc_xact_mem_addr)
   val tc_tm0_bit_index = tgHelper.pa2tm0b(tc_xact_mem_addr, rowOffBits)
   val tc_tm0_rdata  = io.tc.resp.bits.data(tc_tm0_bit_index)
@@ -726,8 +726,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
         tc_xact_tm0_tagN := tc_xact_tm1_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tm0_wmask) =/= UInt(0))
       }
       is(ts_TTL) {
-        tc_xact_tt_tag1 := tc_xact_tm0_tag1 && (io.tc.resp.bits.data & tc_tt_wmask) =/= UInt(0) ||
-                          (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0)
+        tc_xact_tt_tag1 := (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0)
         tc_xact_tt_tagN := tc_xact_tm0_tag1 && (io.tc.resp.bits.tcnt > UInt(1) || (io.tc.resp.bits.data & ~tc_tt_wmask) =/= UInt(0))
       }
     }
