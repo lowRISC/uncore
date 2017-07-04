@@ -423,7 +423,7 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
       assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
       meta_tcnt := meta_tcnt + UInt(1)
     }
-    when (!(xact.data & xact.mask).orR && io.data.resp.bits.data.orR) {
+    when (!(xact.data & xact.mask).orR && (io.data.resp.bits.data & xact.mask).orR && !(io.data.resp.bits.data & ~xact.mask).orR) {
       assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
       meta_tcnt := meta_tcnt - UInt(1)
     }
