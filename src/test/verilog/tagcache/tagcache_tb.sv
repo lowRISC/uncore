@@ -59,9 +59,9 @@ class TCXact;
      addr_type == 1 -> (addr_offset < 64 && addr_offset > -64);
      addr_type == 2 -> (addr_offset < 64*1024 && addr_offset > 64*1024);
    }
-   constraint size_constraint { burst dist {0 := 2, 1 := 6}; }
+   constraint size_constraint { burst dist {0 := 2, 1 := 5}; }
    constraint id_constraint { id < L2Xacts; }
-   constraint tag_constraint { zero_tag dist {0 := 1, 1 := 3}; }
+   constraint tag_constraint { zero_tag dist {0 := 1, 1 := 2}; }
 
    function new();
    endfunction // new
@@ -109,8 +109,9 @@ class TCXact;
          end
          if(zero_tag) tag = 0;
       end else begin            // read
-         int index = addr_offset < 0 ? -addr_offset/64 : addr_offset/64;
-         index = index % addr_queue.size;
+         int unsigned index;
+         addr_offset = addr_offset < 0 ? -addr_offset : addr_offset;
+         index = addr_offset / 64 % addr_queue.size;
          addr = burst ? addr_queue[index] : addr_queue[index] + (addr_offset % 64) / (TLDW/8) * (TLDW/8);
       end
    endfunction // post_randomize
@@ -119,7 +120,7 @@ class TCXact;
       bit [TLAW-1:0] baddr = addr /  64 * 64;
       int unsigned   index = addr[5:0]/(TLDW/8);
 
-      addr_queue.push_front(baddr);
+      if(rw) addr_queue.push_front(baddr);
       if(addr_queue.size > 1024) addr_queue.pop_back();
 
       xact_queue.push_front(this);
@@ -133,7 +134,9 @@ class TCXact;
       if(qi.size == 0)
            $fatal(1, "Get a response to an unknown transaction!n");
       orig_xact = xact_queue[qi[0]];
-      baddr = orig_xact.addr /  64 * 64;
+      addr = orig_xact.addr;
+      burst = orig_xact.burst;
+      baddr = addr /  64 * 64;
       index = addr[5:0]/(TLDW/8);
       if(rw) begin         // write
          // update the data
@@ -141,22 +144,20 @@ class TCXact;
             memory_data_map[baddr] = 0;
             memory_tag_map[baddr] = 0;
          end
-         if(orig_xact.burst) begin
+         if(burst) begin
             memory_data_map[baddr] = orig_xact.data;
             memory_tag_map[baddr]  = orig_xact.tag;
          end else begin
             memory_data_map[baddr][index] = orig_xact.data[index];
             memory_tag_map[baddr][index]  = orig_xact.tag[index];
          end
-         addr = orig_xact.addr;
-         burst = orig_xact.burst;
       end else begin            // read
          if(!memory_data_map.exists(baddr))
-           $fatal(1, "Read response miss in memory map!\n");
+           $fatal(1, "Read response miss in memory map!\n%s\n", toString(1));
          if(burst && (memory_data_map[baddr] != data || memory_tag_map[baddr] != tag))
-           $fatal(1, "Read response mismatch with memory map!\n");
+           $fatal(1, "Read response mismatch with memory map!\n%s\n", toString(1));
          if(!burst && (memory_data_map[baddr][index] != data[index] || memory_tag_map[baddr][index] != tag[index]))
-           $fatal(1, "Read response mismatch with memory map!\n");
+           $fatal(1, "Read response mismatch with memory map!\n%s\n", toString(1));
       end // else: !if(rw)
       xact_queue.delete(qi[0]);
    endfunction // check
@@ -304,6 +305,7 @@ endclass
             @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
+            io_in_acquire_bits_addr_beat = 0;
             io_in_acquire_bits_client_xact_id = xact.id;
             io_in_acquire_bits_is_builtin_type = 'b1;
             io_in_acquire_bits_a_type = 'b001;
@@ -312,11 +314,10 @@ endclass
          end // if (xact.rw && !xact.burst)
 
          if(!xact.rw && !xact.burst) begin      // read a beat
-            int beat = xact.addr[5:0] / (TLDW/8);
             @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
-            io_in_acquire_bits_addr_beat = beat;
+            io_in_acquire_bits_addr_beat = xact.addr[5:0] / (TLDW/8);
             io_in_acquire_bits_client_xact_id = xact.id;
             io_in_acquire_bits_is_builtin_type = 'b1;
             io_in_acquire_bits_a_type = 'b000;
@@ -333,7 +334,7 @@ endclass
          xact = new;
          @(posedge clk); #1;
          io_in_grant_ready = 'b1;
-         #5; if(!io_in_grant_valid) @(posedge io_in_grant_valid);
+         if(!io_in_grant_valid) @(posedge io_in_grant_valid); #1;
 
          if(io_in_grant_bits_g_type == 4'b011) begin
             xact.rw = 'b1;
@@ -361,7 +362,7 @@ endclass
             xact.tag[io_in_grant_bits_addr_beat] = io_in_grant_bits_tag;
             for (i=1; i<TLBS; i=i+1) begin
                @(posedge clk); #1;
-               #5; if(!io_in_grant_valid) @(posedge io_in_grant_valid);
+               if(!io_in_grant_valid) @(posedge io_in_grant_valid);  #1;
                xact.data[io_in_grant_bits_addr_beat] = io_in_grant_bits_data;
                xact.tag[io_in_grant_bits_addr_beat] = io_in_grant_bits_tag;
             end

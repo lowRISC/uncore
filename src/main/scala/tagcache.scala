@@ -739,24 +739,24 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   }
   when(tc_state === ts_TTR && io.tc.resp.valid) {
     tc_state_next := Mux(!io.tc.resp.bits.hit, ts_TM0R,
-                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= (tc_tt_rdata & tc_xact_mem_data),
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_mask) =/= (tc_tt_rdata & tc_xact_mem_mask),
                              ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TM0R && io.tc.resp.valid) {
     tc_state_next := Mux(!io.tc.resp.bits.hit, ts_TM1F,
                          Mux(tc_tm0_rdata, ts_TTF,
-                             Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE)))
+                             Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0), ts_TM1L, ts_IDLE)))
   }
   when(tc_state === ts_TM1F && io.tc.resp.valid) {
     tc_state_next := Mux(tc_tm1_rdata, ts_TM0F,
-                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE))
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0), ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TM0F && io.tc.resp.valid) {
     tc_state_next := Mux(tc_tm0_rdata, ts_TTF,
-                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= UInt(0), ts_TM1L, ts_IDLE))
+                         Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_mask) =/= UInt(0), ts_TM1L, ts_IDLE))
   }
   when(tc_state === ts_TTF && io.tc.resp.valid) {
-    tc_state_next := Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_data) =/= (tc_tt_rdata & tc_xact_mem_data),
+    tc_state_next := Mux(tc_xact_rw && (tc_xact_mem_data & tc_xact_mem_mask) =/= (tc_tt_rdata & tc_xact_mem_data),
                          ts_TM1L, ts_IDLE)
   }
   when(tc_state === ts_TM1L && io.tc.resp.valid) {
