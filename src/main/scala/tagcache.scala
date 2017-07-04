@@ -945,7 +945,7 @@ class TCMemAcquireTracker(id: Int)(implicit p: Parameters) extends TCMemXactTrac
   tc_req_valid := iacq_done
   tc_xact_rw := xact.hasData()
   tc_xact_mem_mask := tmaskFill(xact.tmask_buffer.toBits)
-  tc_xact_mem_addr := xact.full_addr()
+  tc_xact_mem_addr := xact.addr_block << inner.tlBlockOffsetBits
 
   // tl conflicts
   io.tl_block := mt_state =/= ts_IDLE || tc_state =/= ts_IDLE
