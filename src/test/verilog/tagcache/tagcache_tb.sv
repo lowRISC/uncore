@@ -248,12 +248,9 @@ endclass
    reg              io_in_release_bits_client_id;
 
    initial begin
-      reset = 'b0;
-      init = 'b0;
-      #33;
       reset = 'b1;
       init = 'b1;
-      #79;
+      #77;
       reset = 0;
    end
 
