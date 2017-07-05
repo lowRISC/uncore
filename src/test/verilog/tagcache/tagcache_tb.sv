@@ -36,13 +36,16 @@ module tb;
    mailbox   recv_queue = new(1);
    int unsigned gen_cnt = 0, chk_cnt = 0;
    int unsigned xact_max = 0;
+   int unsigned client_id = 0;
+
+   reg              clk, reset, init;
 
    initial begin
       $value$plusargs("max-xact=%d", xact_max);
    end
 
 class TCXact;
-   rand int unsigned             id;
+   int unsigned                  id;
    rand bit [1:0]                addr_type;
    rand int                      addr_offset;
    bit [TLAW-1:0]                addr;
@@ -67,7 +70,6 @@ class TCXact;
      addr_type == 2 -> (addr_offset < 64*1024 && addr_offset > 64*1024);
    }
    constraint size_constraint { burst dist {0 := 2, 1 := 5}; }
-   constraint id_constraint { id < L2Xacts; }
    constraint tag_constraint { zero_tag dist {0 := 1, 1 := 2}; }
 
    function new();
@@ -120,7 +122,10 @@ class TCXact;
          addr_offset = addr_offset < 0 ? -addr_offset : addr_offset;
          index = addr_offset / 64 % addr_queue.size;
          addr = burst ? addr_queue[index] : addr_queue[index] + (addr_offset % 64) / (TLDW/8) * (TLDW/8);
-      end
+      end // else: !if(rw == 1)
+
+      id = client_id;
+      client_id = id == 2**TLCIS - 1 ? 0 : id + 1;
    endfunction // post_randomize
 
    function void record();
@@ -130,15 +135,15 @@ class TCXact;
       if(rw) addr_queue.push_front(baddr);
       if(addr_queue.size > 1024) addr_queue.pop_back();
 
-      xact_queue.push_front(this);
-      id_queue.push_front(gen_cnt);
+      xact_queue.push_back(this);
+      id_queue.push_back(gen_cnt);
    endfunction
 
    function int unsigned check();
       TCXact orig_xact;
       bit [TLAW-1:0] baddr;
       int unsigned   index;
-      int qi[$] = xact_queue.find_last_index(x) with (x.id == id);
+      int qi[$] = xact_queue.find_first_index(x) with (x.id == id);
       automatic int unsigned cnt_id;
       if(qi.size == 0)
            $fatal(1, "Get a response to an unknown transaction!n");
@@ -179,6 +184,7 @@ endclass
    task xact_gen();
       TCXact xact;
       while(xact_max == 0 || gen_cnt < xact_max) begin
+         while(xact.id_queue.size() != 0 && client_id == xact.id_queue[0]) @(posedge clk);
          xact = new;
          xact.randomize();
          send_queue.put(xact);
@@ -206,7 +212,6 @@ endclass
    endtask // xact_check
 
 
-   reg              clk, reset, init;
    logic            io_in_acquire_ready;
    reg              io_in_acquire_valid = 'b0;
    reg [TLAW-7:0]   io_in_acquire_bits_addr_block;
@@ -353,14 +358,14 @@ endclass
          io_in_grant_ready = 'b1;
          if(!io_in_grant_valid) @(posedge io_in_grant_valid); #1;
 
-         if(io_in_grant_bits_g_type == 4'b011) begin
+         if(io_in_grant_bits_g_type == 4'b0011) begin
             xact.rw = 'b1;
             xact.burst = 'b0;
             xact.id = io_in_grant_bits_client_xact_id;
             xact.addr = io_in_grant_bits_addr_beat * (TLDW/8);
          end
 
-         if(io_in_grant_bits_g_type == 4'b100) begin
+         if(io_in_grant_bits_g_type == 4'b0100) begin
             xact.rw = 'b0;
             xact.burst = 'b0;
             xact.id = io_in_grant_bits_client_xact_id;
@@ -369,7 +374,7 @@ endclass
             xact.tag[io_in_grant_bits_addr_beat] = io_in_grant_bits_tag;
          end
             
-         if(io_in_grant_bits_g_type == 4'b101) begin
+         if(io_in_grant_bits_g_type == 4'b0101) begin
             int i;
             xact.rw = 'b0;
             xact.burst = 'b1;
