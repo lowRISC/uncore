@@ -34,6 +34,12 @@ module tb;
 
    mailbox   send_queue = new(1);
    mailbox   recv_queue = new(1);
+   int unsigned gen_cnt = 0, chk_cnt = 0;
+   int unsigned xact_max = 0;
+
+   initial begin
+      $value$plusargs("max-xact=%d", xact_max);
+   end
 
 class TCXact;
    rand int unsigned             id;
@@ -47,6 +53,7 @@ class TCXact;
    rand bit                      zero_tag;
 
    static TCXact xact_queue[$];
+   static int unsigned id_queue[$];
 
    // address types:
    //   0: just the last one
@@ -124,16 +131,19 @@ class TCXact;
       if(addr_queue.size > 1024) addr_queue.pop_back();
 
       xact_queue.push_front(this);
+      id_queue.push_front(gen_cnt);
    endfunction
 
-   function void check();
+   function int unsigned check();
       TCXact orig_xact;
       bit [TLAW-1:0] baddr;
       int unsigned   index;
       int qi[$] = xact_queue.find_last_index(x) with (x.id == id);
+      automatic int unsigned cnt_id;
       if(qi.size == 0)
            $fatal(1, "Get a response to an unknown transaction!n");
       orig_xact = xact_queue[qi[0]];
+      cnt_id = id_queue[qi[0]];
       addr = orig_xact.addr;
       burst = orig_xact.burst;
       baddr = addr /  64 * 64;
@@ -153,35 +163,46 @@ class TCXact;
          end
       end else begin            // read
          if(!memory_data_map.exists(baddr))
-           $fatal(1, "Read response miss in memory map!\n%s\n", toString(1));
+           $fatal(1, "Read response miss in memory map!\n(%0d): %s\n", id_queue[qi[0]], toString(1));
          if(burst && (memory_data_map[baddr] != data || memory_tag_map[baddr] != tag))
-           $fatal(1, "Read response mismatch with memory map!\n%s\n", toString(1));
+           $fatal(1, "Read response mismatch with memory map!\n(%0d): %s\n", cnt_id, toString(1));
          if(!burst && (memory_data_map[baddr][index] != data[index] || memory_tag_map[baddr][index] != tag[index]))
-           $fatal(1, "Read response mismatch with memory map!\n%s\n", toString(1));
+           $fatal(1, "Read response mismatch with memory map!\n(%0d): %s\n", cnt_id, toString(1));
       end // else: !if(rw)
       xact_queue.delete(qi[0]);
+      id_queue.delete(qi[0]);
+      return cnt_id;
    endfunction // check
 
 endclass
 
    task xact_gen();
       TCXact xact;
-      while(1) begin
+      while(xact_max == 0 || gen_cnt < xact_max) begin
          xact = new;
          xact.randomize();
          send_queue.put(xact);
          xact.record();
-         $info("Generate a %s\n", xact.toString());
+         $info("Generate a (%0d) %s\n", gen_cnt, xact.toString());
+         gen_cnt = gen_cnt + 1;
       end
    endtask // xact_gen
 
    task xact_check();
       TCXact xact;
-      while(1) begin
+      automatic int unsigned id;
+      while(xact_max == 0 || chk_cnt < xact_max) begin
          recv_queue.get(xact);
-         xact.check();
-         $info("Recieve a %s\n", xact.toString(1));
+         id = xact.check();
+         chk_cnt = chk_cnt + 1;
+         $info("Recieve a (%0d) %s\n", id, xact.toString(1));
       end
+
+      if(xact.xact_queue.size() != 0)
+        $fatal(1, "Simulation finishes with more responses received than requests generated!\n",);
+
+      $info("Simulation finishes OK with %d requests sent and checked.", chk_cnt);
+      $finish();
    endtask // xact_check
 
 
