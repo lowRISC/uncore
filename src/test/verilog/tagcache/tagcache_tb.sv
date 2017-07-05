@@ -287,17 +287,16 @@ endclass
          end // if (xact.rw && xact.burst)
 
          if(xact.rw && !xact.burst) begin      // write a beat
-            int beat = xact.addr[5:0] / (TLDW/8);
             @(posedge clk); #1;
             io_in_acquire_valid = 'b1;
             io_in_acquire_bits_addr_block = xact.addr >> 6;
             io_in_acquire_bits_client_xact_id = xact.id;
-            io_in_acquire_bits_addr_beat = beat;
+            io_in_acquire_bits_addr_beat = xact.addr[5:0] / (TLDW/8);
             io_in_acquire_bits_is_builtin_type = 'b1;
             io_in_acquire_bits_a_type = 'b010;
             io_in_acquire_bits_union = {{TLDW/64*4{1'b1}}, {TLDW/8{1'b1}}, 1'b1};
-            io_in_acquire_bits_data = xact.data[beat];
-            io_in_acquire_bits_tag = xact.tag[beat];
+            io_in_acquire_bits_data = xact.data[io_in_acquire_bits_addr_beat];
+            io_in_acquire_bits_tag = xact.tag[io_in_acquire_bits_addr_beat];
             #5; if(!io_in_acquire_ready) @(posedge io_in_acquire_ready);
          end // if (xact.rw && !xact.burst)
 
