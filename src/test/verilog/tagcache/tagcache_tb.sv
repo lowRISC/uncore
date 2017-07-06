@@ -63,14 +63,15 @@ class TCXact;
    //   1: within neighbour block
    //   2: within the same page
    //   3: anywhere
-   constraint type_constraint { addr_type dist {0 := 3, 1 := 6, 2 := 3, 3 := 2}; }
+   constraint type_constraint { addr_type dist {0 := 1, 1 := 2, 2 := 3, 3 := 3 }; }
    constraint offset_constraint {
      addr_type == 0 -> (addr_offset == 0);
-     addr_type == 1 -> (addr_offset < 64 && addr_offset > -64);
-     addr_type == 2 -> (addr_offset < 64*1024 && addr_offset > 64*1024);
+     addr_type == 1 -> (addr_offset <= 64*1     && addr_offset >= -64*1   );
+     addr_type == 2 -> (addr_offset <= 64*1024  && addr_offset >= -64*1024);
    }
    constraint size_constraint { burst dist {0 := 2, 1 := 5}; }
-   constraint tag_constraint { zero_tag dist {0 := 1, 1 := 2}; }
+   constraint tag_constraint  { zero_tag dist {0 := 1, 1 := 1}; }
+   constraint rw_constraint   { rw dist {0 := 1, 1 := 2}; }
 
    function new();
    endfunction // new
@@ -107,7 +108,10 @@ class TCXact;
         rw = 1;
 
       if(rw == 1) begin         // write
-         addr = addr_queue[0] - MemBase + addr_offset;
+         if(addr_queue.size() > 0)
+           addr = addr_queue[0] - MemBase + addr_offset;
+         else
+           addr = MemSize / 2 + addr_offset;
          addr = addr % MemSize;
          addr = addr < 0 ? addr + MemSize : addr;
          addr = burst ? addr / 64 * 64 : addr / (TLDW/8) * (TLDW/8);
