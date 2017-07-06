@@ -420,11 +420,11 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
   when(state === s_DR && io.data.resp.valid) {
     data_buf(row) := (xact.data & xact.mask) | (io.data.resp.bits.data & ~xact.mask)
     when ((xact.data & xact.mask).orR && !io.data.resp.bits.data.orR) {
-      assert(!meta_tcnt.andR, "add a tag in a full line is impossible!")
+      assert(!meta_tcnt.andR, s"TagXact$id: add a tag in a full line is impossible!")
       meta_tcnt := meta_tcnt + UInt(1)
     }
     when (!(xact.data & xact.mask).orR && (io.data.resp.bits.data & xact.mask).orR && !(io.data.resp.bits.data & ~xact.mask).orR) {
-      assert(meta_tcnt.orR, "clear a tag in an empty line is impossible!")
+      assert(meta_tcnt.orR, s"TagXact$id: clear a tag in an empty line is impossible!")
       meta_tcnt := meta_tcnt - UInt(1)
     }
   }
@@ -508,9 +508,9 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
 
   // run-time checks
   assert(!io.meta.resp.valid || !TCTagOp.isCreate(xact.op) || !io.meta.resp.bits.hit,
-    "a tag cache create transaction should always miss in cache!")
+    s"TagXact$id: a tag cache create transaction should always miss in cache!")
   assert(state === state_next || (data_cnt === UInt(0) || data_done) && (fetch_cnt === UInt(0) || fetch_done),
-    "counters should return to zero when state changes!")
+    s"TagXact$id: counters should return to zero when state changes!")
 
   // report log
   when(io.xact.resp.valid) {
@@ -1095,7 +1095,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
   }}
 
   assert(memTrackers.map(_.io.tl_block).reduce(_||_) || !lock_vec.map(_.lock).reduce(_||_),
-    "all tag cache lines should be unlocked when the cache is idle!")
+    "TagCache: all tag cache lines should be unlocked when the cache is idle!")
 
   // connect TileLink outputs
   val outer_arb = Module(new ClientUncachedTileLinkIOArbiter(nMemTransactors + nTagTransactors + 1)
