@@ -468,8 +468,6 @@ class TCTagXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p) wi
     }.elsewhen(io.meta.resp.bits.hit) {
       state_next := s_DR
       when(!TCTagOp.isWrite(xact.op) && io.meta.resp.bits.meta.tcnt === UInt(0)) {
-        // find an empty top map line
-        assert(tgHelper.is_top(xact.addr), "only top map lines can be empty and cached at any time!")
         state_next := s_L
       }
       when(xact.op === TCTagOp.I) {
