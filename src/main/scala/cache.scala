@@ -208,10 +208,13 @@ abstract class L2HellaCacheModule(implicit val p: Parameters) extends Module
     with HasL2HellaCacheParameters {
   def doInternalOutputArbitration[T <: Data : ClassTag](
       out: DecoupledIO[T],
-      ins: Seq[DecoupledIO[T]]) {
+      ins: Seq[DecoupledIO[T]],
+      req_enable: Bool = Bool(true)) {
     val arb = Module(new RRArbiter(out.bits, ins.size))
     out <> arb.io.out
-    arb.io.in <> ins 
+    arb.io.in <> ins
+    out.valid := req_enable && arb.io.out.valid
+    arb.io.out.ready := req_enable && out.ready
   }
 
   def doInternalInputRouting[T <: Bundle with HasL2Id](in: ValidIO[T], outs: Seq[ValidIO[T]]) {
@@ -418,8 +421,11 @@ class TSHRFile(implicit p: Parameters) extends L2HellaCacheModule()(p)
   
   // WritebackUnit evicts data from L2, including invalidating L1s
   val wb = Module(new L2WritebackUnit(nTransactors))
+  val wb_req_enable = (0 until nReleaseTransactors).map(i =>
+    !(trackerList(i).io.inner.release.valid && trackerList(i).io.alloc.irel) && !trackerList(i).io.busy
+  ).reduce(_&&_)
   val trackerAndWbIOs = trackerList.map(_.io) :+ wb.io
-  doInternalOutputArbitration(wb.io.wb.req, trackerList.map(_.io.wb.req))
+  doInternalOutputArbitration(wb.io.wb.req, trackerList.map(_.io.wb.req), wb_req_enable)
   doInternalInputRouting(wb.io.wb.resp, trackerList.map(_.io.wb.resp))
 
   // Propagate incoherence flags
@@ -476,6 +482,7 @@ class L2XactTrackerIO(implicit p: Parameters) extends HierarchicalXactTrackerIO(
   val data = new L2DataRWIO
   val meta = new L2MetaRWIO
   val wb = new L2WritebackIO
+  val busy = Bool(OUTPUT)
 }
 
 abstract class L2XactTracker(implicit p: Parameters) extends XactTracker()(p)
@@ -533,6 +540,7 @@ class L2VoluntaryReleaseTracker(trackerId: Int)(implicit p: Parameters) extends 
 
   val s_idle :: s_meta_read :: s_meta_resp :: s_busy :: s_meta_write :: Nil = Enum(UInt(), 5)
   val state = Reg(init=s_idle)
+  io.busy := state =/= s_idle
 
   val xact = Reg(new BufferedReleaseFromSrc()(p.alterPartial({case TLId => p(InnerTLId)})))
   val xact_way_en = Reg{ Bits(width = nWays) }
@@ -630,6 +638,7 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
 
   val s_idle :: s_meta_read :: s_meta_resp :: s_wb_req :: s_wb_resp :: s_inner_probe :: s_outer_acquire :: s_busy :: s_meta_write :: Nil = Enum(UInt(), 9)
   val state = Reg(init=s_idle)
+  io.busy := state =/= s_idle
 
   // State holding transaction metadata
   val data_buffer = Reg(init=Vec.fill(innerDataBeats)(UInt(0, width = innerDataBits)))
@@ -813,10 +822,10 @@ class L2AcquireTracker(trackerId: Int)(implicit p: Parameters) extends L2XactTra
   // These IOs are used for routing in the parent
   val iacq_in_same_set = inSameSet(xact_addr_block, io.iacq().addr_block)
   val irel_in_same_set = inSameSet(xact_addr_block, io.irel().addr_block)
-  val before_wb_alloc = Vec(s_meta_read, s_meta_resp, s_wb_req).contains(state)
+  val before_wb_req = Vec(s_meta_read, s_meta_resp).contains(state)
   io.matches.iacq := (state =/= s_idle) && iacq_in_same_set
   io.matches.irel := (state =/= s_idle) && 
-                       Mux(before_wb_alloc, irel_in_same_set, io.irel().conflicts(xact_addr_block))
+                       Mux(before_wb_req, irel_in_same_set, state =/= s_wb_req && io.irel().conflicts(xact_addr_block))
   io.matches.oprb := Bool(false) //TODO
 
   // Actual transaction processing logic begins here:
