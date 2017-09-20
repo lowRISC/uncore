@@ -214,6 +214,7 @@ abstract class L2HellaCacheModule(implicit val p: Parameters) extends Module
     out <> arb.io.out
     arb.io.in <> ins
     out.valid := req_enable && arb.io.out.valid
+    arb.io.out.ready := req_enable && out.ready
   }
 
   def doInternalInputRouting[T <: Bundle with HasL2Id](in: ValidIO[T], outs: Seq[ValidIO[T]]) {
@@ -420,7 +421,7 @@ class TSHRFile(implicit p: Parameters) extends L2HellaCacheModule()(p)
   
   // WritebackUnit evicts data from L2, including invalidating L1s
   val wb = Module(new L2WritebackUnit(nTransactors))
-  val wb_req_enable = (0 until nReleaseTransactors).map(i => 
+  val wb_req_enable = (0 until nReleaseTransactors).map(i =>
     !(trackerList(i).io.inner.release.valid && trackerList(i).io.alloc.irel) && !trackerList(i).io.busy
   ).reduce(_&&_)
   val trackerAndWbIOs = trackerList.map(_.io) :+ wb.io
