@@ -83,7 +83,7 @@ class TCXact;
       tag   = xact.tag;
       rw    = xact.rw;
       burst = xact.burst;
-   endfunction // new
+   endfunction // copy
 
    function string toString(int resp = 0);
       string operation_str = rw ? "write" : "read";
