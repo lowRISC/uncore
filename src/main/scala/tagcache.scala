@@ -569,7 +569,7 @@ class TCMemXactTracker(id: Int)(implicit p: Parameters) extends TCModule()(p)
   val tc_xact_rw        = Wire(Bool()) // r:0 w:1
   val tc_xact_mem_data  = Reg(UInt(width = tgHelper.cacheBlockTagBits))
   val tc_xact_mem_mask  = Wire(UInt(width = tgHelper.cacheBlockTagBits))
-  val tc_xact_mem_addr  = Wire(UInt(width = tgHelper.cacheBlockTagBits))
+  val tc_xact_mem_addr  = Wire(UInt(width = p(PAddrBits)))
   val tc_xact_tt_tag1   = Reg(Bool()) // the target tag is set
   val tc_xact_tt_tagN   = Reg(Bool()) // there are other tags
   val tc_xact_tm0_tag1  = Reg(Bool())
