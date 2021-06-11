@@ -1059,7 +1059,7 @@ class TagCache(implicit p: Parameters) extends TCModule()(p)
 
   // transaction locks
   //              total lock may need - number of trackers blocked + 1
-  val nLocks = max(min(nMemTransactors, nTopMapBlocks) * 2 - nTagTransactors + 1, 1)
+  val nLocks = min(nMemTransactors, nTopMapBlocks) * 2
   val lock_vec = Reg(init = Vec.fill(nLocks)(TCTagLock()))
   val lock_avail = lock_vec.map(!_.lock)
   val lock_avail_bit = lock_avail.reduce(_||_)
