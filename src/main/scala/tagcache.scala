@@ -997,6 +997,7 @@ class TCInitiator(id:Int)(implicit p: Parameters) extends TCModule()(p) {
     io.tag_xact.req.valid  := Bool(true)
     io.tag_xact.req.bits.addr := UInt(tgHelper.map1Base) + UInt(id) * UInt(p(CacheBlockBytes)) + rst_cnt * UInt(nTagTransactors * p(CacheBlockBytes))
     io.tag_xact.req.bits.op   := TCTagOp.C
+    io.mem_xact.req.ready  := Bool(false)
     io.mem_xact.resp.valid := Bool(false)
   }
 
